@@ -14,7 +14,13 @@ import requests
 import time
 import sys
 import signal
+import uuid
 from pathlib import Path
+
+# Small, consistent buffers are critical for perceived latency. Lowering the
+# trailing silence window keeps requests moving as soon as the user stops
+# talking, so the server can start speaking almost immediately.
+
 
 # Configuration
 SERVER_URL = "http://localhost:8000"
@@ -25,7 +31,10 @@ FORMAT = pyaudio.paInt16
 
 # Audio recording settings
 SILENCE_THRESHOLD = 500  # Adjust based on your microphone
-SILENCE_DURATION = 2.0  # Seconds of silence to stop recording
+# Stop recording after ~0.4s of trailing silence to keep round-trip latency low
+SILENCE_DURATION = 0.4
+# Ensure we captured at least this much speech before auto-stopping (seconds)
+MIN_UTTERANCE_DURATION = 0.4
 
 class JARVISClient:
     """Interactive voice client for JARVIS"""
@@ -58,13 +67,15 @@ class JARVISClient:
         
         frames = []
         silence_chunks = 0
-        max_silence_chunks = int(SILENCE_DURATION * SAMPLE_RATE / CHUNK_SIZE)
+        total_chunks = 0
+        max_silence_chunks = max(1, int(SILENCE_DURATION * SAMPLE_RATE / CHUNK_SIZE))
         recording_started = False
         
         try:
             while self.is_running:
                 data = stream.read(CHUNK_SIZE, exception_on_overflow=False)
                 frames.append(data)
+                total_chunks += 1
                 
                 # Calculate audio level
                 audio_data = struct.unpack(f'{CHUNK_SIZE}h', data)
@@ -75,8 +86,11 @@ class JARVISClient:
                     silence_chunks = 0
                 elif recording_started:
                     silence_chunks += 1
-                    
-                    if silence_chunks >= max_silence_chunks:
+                    recorded_duration = (total_chunks * CHUNK_SIZE) / SAMPLE_RATE
+                    if (
+                        silence_chunks >= max_silence_chunks
+                        and recorded_duration >= MIN_UTTERANCE_DURATION
+                    ):
                         print("✓ Recording complete")
                         break
                         
@@ -125,54 +139,81 @@ class JARVISClient:
             stream.close()
     
     def send_voice_request(self, audio_data):
-        """Send voice request to JARVIS and get audio response"""
+        """Send voice request to JARVIS and stream the audio response immediately"""
         try:
-            # Send audio file
             files = {'audio': ('audio.wav', audio_data, 'audio/wav')}
-            
             print("🤔 JARVIS is thinking...")
             start_time = time.time()
             
-            response = requests.post(
+            with requests.post(
                 f"{SERVER_URL}/api/voice",
                 files=files,
-                timeout=60
-            )
-            
-            if response.status_code != 200:
-                print(f"❌ Error: {response.status_code}")
-                print(response.text)
-                return None
-            
-            elapsed = time.time() - start_time
-            print(f"⚡ Response in {elapsed:.2f}s")
-            
-            # Get audio response
-            content_type = response.headers.get('content-type', '')
-            
-            if 'audio' in content_type:
-                return response.content
-            elif 'json' in content_type:
-                # Handle JSON response with base64 audio
-                import json
-                import base64
-                result = response.json()
-                print(f"\n💬 You said: {result.get('transcription', '')}")
-                print(f"💭 JARVIS: {result.get('response_text', '')[:100]}...")
+                stream=True,
+                timeout=120
+            ) as response:
+                if response.status_code != 200:
+                    print(f"❌ Error: {response.status_code}")
+                    print(response.text)
+                    return False
                 
-                if 'audio' in result:
-                    return base64.b64decode(result['audio'])
-                return None
-            else:
-                print(f"Unexpected content type: {content_type}")
-                return None
-                
+                content_type = response.headers.get('content-type', '')
+                if 'audio' in content_type:
+                    stream = self.p.open(
+                        format=pyaudio.paInt16,
+                        channels=2,
+                        rate=22050,
+                        output=True,
+                        frames_per_buffer=1024
+                    )
+                    header_remaining = 44
+                    first_audio_latency = None
+                    try:
+                        for chunk in response.iter_content(chunk_size=4096):
+                            if not chunk:
+                                continue
+                            if header_remaining > 0:
+                                if len(chunk) <= header_remaining:
+                                    header_remaining -= len(chunk)
+                                    continue
+                                chunk = chunk[header_remaining:]
+                                header_remaining = 0
+                            if first_audio_latency is None:
+                                first_audio_latency = time.time() - start_time
+                                print(
+                                    f"\r🔊 JARVIS speaking... (audio started in {first_audio_latency:.2f}s)",
+                                    end='',
+                                    flush=True
+                                )
+                            stream.write(chunk)
+                    finally:
+                        stream.stop_stream()
+                        stream.close()
+                    total_time = time.time() - start_time
+                    if first_audio_latency is None:
+                        print("\n⚠️  No audio data received.")
+                        return False
+                    print(f"\n⚡ Response finished in {total_time:.2f}s")
+                    return True
+                elif 'json' in content_type:
+                    import json
+                    import base64
+                    result = response.json()
+                    print(f"\n💬 You said: {result.get('transcription', '')}")
+                    print(f"💭 JARVIS: {result.get('response_text', '')[:100]}...")
+                    if 'audio' in result:
+                        audio_bytes = base64.b64decode(result['audio'])
+                        self.play_audio_stream(audio_bytes)
+                        return True
+                    return False
+                else:
+                    print(f"Unexpected content type: {content_type}")
+                    return False
         except requests.exceptions.Timeout:
             print("⏱️  Request timed out. JARVIS might be processing a complex query.")
-            return None
+            return False
         except Exception as e:
             print(f"❌ Error: {e}")
-            return None
+            return False
     
     def run_interactive(self):
         """Run interactive voice conversation loop"""
@@ -211,11 +252,9 @@ class JARVISClient:
                     continue
                 
                 # Send to JARVIS
-                response_audio = self.send_voice_request(audio_data)
+                success = self.send_voice_request(audio_data)
                 
-                if response_audio:
-                    print("🔊 JARVIS is speaking...")
-                    self.play_audio_stream(response_audio)
+                if success:
                     print("✓ Done\n")
                 else:
                     print("No audio response received.\n")
@@ -271,9 +310,32 @@ def run_text_mode():
     print()
     print("="*70 + "\n")
     
-    # Initialize PyAudio for playback
+    # Initialize PyAudio for playback and keep stream open to avoid repeated ALSA/JACK setup cost
     p = pyaudio.PyAudio()
+    try:
+        stream_open_start = time.time()
+        output_stream = p.open(
+            format=pyaudio.paInt16,
+            channels=2,
+            rate=22050,
+            output=True,
+            frames_per_buffer=256,  # Reduced from 1024 for lower latency
+            start=True
+        )
+        stream_open_time = time.time() - stream_open_start
+        print(f"🔊 Audio device initialized in {stream_open_time:.3f}s")
+        
+        # Pre-warm audio device with silence to ensure it's ready
+        # This prevents device wakeup delays on first real audio chunk
+        silence = b'\x00' * (256 * 2 * 2)  # 256 frames, 2 channels, 2 bytes per sample
+        output_stream.write(silence)
+        print(f"🔊 Audio device pre-warmed and ready")
+    except Exception as e:
+        print(f"❌ Unable to open audio output stream: {e}")
+        p.terminate()
+        return
     
+    session_id = f"text-session-{uuid.uuid4()}"
     while True:
         try:
             # Get text input
@@ -282,49 +344,54 @@ def run_text_mode():
             if not user_text:
                 continue
             
-            if user_text.lower() in ['quit', 'exit', 'bye']:
+            lowered = user_text.lower()
+            if lowered in ['quit', 'exit', 'bye']:
                 print("\n👋 Goodbye!")
                 break
+            if lowered in {'reset', '/reset', 'new chat', 'clear'}:
+                session_id = f"text-session-{uuid.uuid4()}"
+                print("🔄 Started a fresh chat session.")
+                continue
             
             print("🎤 JARVIS speaking... ", end='', flush=True)
+            request_start = time.time()
+            first_chunk_received = None
+            first_write_start = None
+            first_write_complete = None
+            
+            # Keep audio device active during network/LLM processing
+            # Write tiny silence to prevent suspension
+            warmup_silence = b'\x00' * 128
+            output_stream.write(warmup_silence)
             
             # Send text to /api/voice/text endpoint for streaming audio response
             response = requests.post(
                 f"{SERVER_URL}/api/voice/text",
-                json={"text": user_text},
+                json={"text": user_text, "session_id": session_id},
                 stream=True,
                 timeout=120  # 2 minutes for web search and long queries
             )
             
             if response.status_code == 200:
-                # Stream audio playback in real-time
-                stream = p.open(
-                    format=pyaudio.paInt16,
-                    channels=2,
-                    rate=22050,
-                    output=True,
-                    frames_per_buffer=1024
-                )
-                
-                # Skip WAV header (44 bytes)
-                header_skipped = False
-                bytes_read = 0
-                
+                header_remaining = 44
                 for chunk in response.iter_content(chunk_size=4096):
-                    if chunk:
-                        if not header_skipped and bytes_read < 44:
-                            # Skip WAV header
-                            bytes_read += len(chunk)
-                            if bytes_read >= 44:
-                                # Start playing after header
-                                chunk = chunk[44 - (bytes_read - len(chunk)):]
-                                header_skipped = True
-                                stream.write(chunk)
-                        else:
-                            stream.write(chunk)
-                
-                stream.stop_stream()
-                stream.close()
+                    if not chunk:
+                        continue
+                    if header_remaining > 0:
+                        if len(chunk) <= header_remaining:
+                            header_remaining -= len(chunk)
+                            continue
+                        chunk = chunk[header_remaining:]
+                        header_remaining = 0
+                    if first_chunk_received is None:
+                        first_chunk_received = time.time() - request_start
+                        print(f"[recv={first_chunk_received:.3f}s] ", end='', flush=True)
+                        first_write_start = time.time()
+                    output_stream.write(chunk)
+                    if first_write_complete is None:
+                        first_write_complete = time.time() - first_write_start
+                        total_to_first_write = time.time() - request_start
+                        print(f"[write={first_write_complete:.3f}s] [total={total_to_first_write:.3f}s] ", end='', flush=True)
                 print("✅")
             else:
                 print(f"\n❌ Error: {response.status_code}")
@@ -335,6 +402,11 @@ def run_text_mode():
         except Exception as e:
             print(f"\n❌ Error: {e}")
     
+    try:
+        output_stream.stop_stream()
+        output_stream.close()
+    except Exception:
+        pass
     p.terminate()
 
 if __name__ == "__main__":

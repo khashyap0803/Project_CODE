@@ -7,16 +7,21 @@ from fastapi.responses import JSONResponse, StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 import asyncio
+from contextlib import suppress
 import json
 import time
 import io
+import os
+import shlex
+import shutil
+from pathlib import Path
 
 from core.config import settings
 from core.logger import setup_logger
 from core.session import session_manager
-from services import whisper_stt, llm
+from services import whisper_stt, llm, LLMContextExceededError
 from services.tts_hybrid import tts_service as piper_tts
 from tools import perplexity, tool_manager
 from tools.code_executor import execute_code, run_command, get_system_status, manage_file
@@ -117,6 +122,322 @@ def detect_language(text: str) -> str:
             return "hi"
     return "en"  # Default to English
 
+def limit_history_for_context(history: List[Dict[str, str]], char_limit: int) -> List[Dict[str, str]]:
+    """Trim history so the combined text stays within an approximate char budget"""
+    if not history:
+        return history
+    trimmed: List[Dict[str, str]] = []
+    total_chars = 0
+    # Walk from newest to oldest so we always keep the latest turns
+    for turn in reversed(history):
+        content_len = len(turn.get("content", ""))
+        if trimmed and total_chars + content_len > char_limit:
+            break
+        trimmed.append(turn)
+        total_chars += content_len
+    return list(reversed(trimmed))
+
+
+def calculate_max_prompt_chars() -> int:
+    """Derive a conservative character budget from MAX_HISTORY or LLM context."""
+    # Default fallback assumes 8192 context (~3 chars/token)
+    max_ctx = settings.LLM_MAX_CONTEXT or 8192
+    server_ctx = getattr(settings, "LLM_SERVER_MAX_CONTEXT", None)
+    if server_ctx:
+        max_ctx = min(max_ctx, server_ctx)
+    # Be conservative: keep prompts under 65% of total context to leave headroom for response tokens
+    return int(max_ctx * 0.65 * 3)
+
+# === OS / Application Control Helpers ===
+
+ACTION_VERBS = ("open", "launch", "start", "run", "execute", "play")
+
+APP_KEYWORDS = {
+    # System utilities
+    "terminal": "terminal",
+    "terminal emulator": "terminal",
+    "command prompt": "terminal",
+    "console": "terminal",
+    "system settings": "system_settings",
+    "settings": "system_settings",
+    "control center": "system_settings",
+    "file manager": "file_manager",
+    "files": "file_manager",
+    "file explorer": "file_manager",
+    "calculator": "calculator",
+    "text editor": "text_editor",
+    "notepad": "text_editor",
+    "gedit": "text_editor",
+
+    # Browsers
+    "browser": "browser",
+    "firefox": "firefox",
+    "chrome": "chrome",
+    "chromium": "chrome",
+    "google chrome": "chrome",
+    "edge": "edge",
+    "microsoft edge": "edge",
+
+    # IDEs / Editors
+    "vscode": "vscode",
+    "vs code": "vscode",
+    "visual studio code": "vscode",
+    "pycharm": "pycharm",
+    "sublime": "sublime",
+    "atom": "atom",
+    "android studio": "android_studio",
+    "intellij": "intellij",
+
+    # Maker tools
+    "arduino": "arduino",
+    "arduino ide": "arduino",
+
+    # Communication / media
+    "whatsapp": "whatsapp",
+    "telegram": "telegram",
+    "discord": "discord",
+    "slack": "slack",
+    "spotify": "spotify",
+    "vlc": "vlc",
+    "teamviewer": "teamviewer",
+    "gimp": "gimp",
+    "zoom": "zoom",
+}
+
+APP_COMMAND_CANDIDATES = {
+    "terminal": [
+        "kgx",  # GNOME console
+        "gnome-terminal",
+        "x-terminal-emulator",
+        "tilix",
+        "konsole",
+        "xfce4-terminal",
+        "mate-terminal",
+        "alacritty",
+        "xterm",
+        "gtk-launch org.gnome.Console.desktop",
+    ],
+    "system_settings": [
+        "gnome-control-center",
+        "unity-control-center",
+        "systemsettings5",
+        "xfce4-settings-manager",
+        "kcmshell5",
+        "gtk-launch org.gnome.Settings.desktop",
+    ],
+    "file_manager": [
+        "nautilus",
+        "nemo",
+        "dolphin",
+        "thunar",
+        "pcmanfm",
+        "gtk-launch org.gnome.Nautilus.desktop",
+    ],
+    "vscode": ["code"],
+    "pycharm": ["pycharm", "pycharm-community"],
+    "sublime": ["subl", "sublime_text"],
+    "atom": ["atom"],
+    "arduino": ["arduino-ide", "arduino"],
+    "intellij": ["idea", "intellij-idea-community", "intellij-idea-ultimate"],
+    "android_studio": ["studio.sh", "android-studio"],
+    "browser": ["xdg-open https://www.google.com", "firefox", "google-chrome", "chromium", "chromium-browser"],
+    "firefox": ["firefox"],
+    "chrome": ["google-chrome", "chrome", "chromium", "chromium-browser"],
+    "edge": ["microsoft-edge", "microsoft-edge-stable"],
+    "calculator": ["gnome-calculator", "kcalc"],
+    "text_editor": ["gedit", "xed", "kate", "mousepad"],
+    "whatsapp": [
+        "firefox https://web.whatsapp.com",
+        "google-chrome https://web.whatsapp.com",
+    ],
+    "telegram": ["telegram-desktop"],
+    "discord": ["discord"],
+    "slack": ["slack"],
+    "spotify": ["spotify"],
+    "vlc": ["vlc"],
+    "teamviewer": ["teamviewer"],
+    "gimp": ["gimp"],
+    "zoom": ["zoom"],
+}
+
+APP_ENV_OVERRIDES = {
+    "system_settings": {
+        "XDG_CURRENT_DESKTOP": "ubuntu:GNOME",
+        "DESKTOP_SESSION": "gnome",
+    }
+}
+
+APP_DESKTOP_HINTS = {
+    "terminal": ["console", "kgx", "konsole"],
+    "system_settings": ["settings", "controlcenter", "controlcentre", "gnomecontrolcenter"],
+    "file_manager": ["nautilus", "nemo", "thunar", "dolphin"],
+}
+
+ENV_DEFAULT_VARS = {
+    "XDG_CURRENT_DESKTOP": "GNOME",
+    "DESKTOP_SESSION": "gnome",
+    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin",
+}
+
+ENV_PASSTHROUGH_VARS = (
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "XAUTHORITY",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "GNOME_DESKTOP_SESSION_ID",
+    "SESSION_MANAGER",
+)
+
+def _build_env_wrapper_tokens(env_overrides: Optional[Dict[str, str]] = None) -> List[str]:
+    overrides = env_overrides or {}
+    tokens: List[str] = ["env", "-i"]
+
+    for key, default in ENV_DEFAULT_VARS.items():
+        value = overrides.get(key, os.environ.get(key)) or default
+        if value:
+            tokens.append(f"{key}={value}")
+
+    for key in ENV_PASSTHROUGH_VARS:
+        if key in ENV_DEFAULT_VARS:
+            continue
+        value = overrides.get(key, os.environ.get(key))
+        if value:
+            tokens.append(f"{key}={value}")
+
+    for key, value in overrides.items():
+        if key in ENV_DEFAULT_VARS or key in ENV_PASSTHROUGH_VARS:
+            continue
+        if value:
+            tokens.append(f"{key}={value}")
+
+    return tokens
+
+DESKTOP_DIRS = [
+    Path.home() / ".local/share/applications",
+    Path("/usr/share/applications"),
+    Path("/usr/local/share/applications"),
+]
+
+def _normalize_text(value: str) -> str:
+    return "".join(ch for ch in value.lower() if ch.isalnum())
+
+def _build_desktop_cache() -> List[Dict[str, str]]:
+    entries: List[Dict[str, str]] = []
+    for directory in DESKTOP_DIRS:
+        try:
+            if not directory.exists():
+                continue
+            for desktop_file in directory.glob("*.desktop"):
+                entries.append({
+                    "file": desktop_file.name,
+                    "match": _normalize_text(desktop_file.stem)
+                })
+        except Exception as exc:
+            logger.debug(f"Skipping desktop directory {directory}: {exc}")
+    return entries
+
+DESKTOP_CACHE = _build_desktop_cache()
+
+def find_desktop_entry(app_name: str) -> Optional[str]:
+    """Return .desktop filename that best matches the app name"""
+    normalized = _normalize_text(app_name)
+    if not normalized:
+        return None
+    for entry in DESKTOP_CACHE:
+        if normalized in entry["match"]:
+            return entry["file"]
+    return None
+
+def find_available_command(candidates: List[str]) -> Optional[str]:
+    """Return the first available command from candidates"""
+    for candidate in candidates:
+        try:
+            parts = shlex.split(candidate)
+        except ValueError as exc:
+            logger.debug(f"Unable to parse command '{candidate}': {exc}")
+            continue
+        if not parts:
+            continue
+        executable = parts[0]
+        if shutil.which(executable):
+            return " ".join(parts)
+    return None
+
+def build_launch_command(command: str, env_overrides: Optional[Dict[str, str]] = None) -> str:
+    env_tokens = _build_env_wrapper_tokens(env_overrides)
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        parts = [command]
+
+    parts = [part for part in parts if part]
+    if not parts:
+        parts = [command]
+
+    final_tokens = ["nohup", *(env_tokens or []), *parts]
+    quoted = " ".join(shlex.quote(token) for token in final_tokens)
+    return f"{quoted} &"
+
+def resolve_known_application(key: str) -> Optional[str]:
+    candidates = APP_COMMAND_CANDIDATES.get(key)
+    if candidates:
+        command = find_available_command(candidates)
+        if command:
+            return build_launch_command(command, APP_ENV_OVERRIDES.get(key))
+    # Try desktop entry fallback
+    desktop_entry = find_desktop_entry(key)
+    if not desktop_entry:
+        for hint in APP_DESKTOP_HINTS.get(key, []):
+            desktop_entry = find_desktop_entry(hint)
+            if desktop_entry:
+                break
+    if desktop_entry and shutil.which('gtk-launch'):
+        return build_launch_command(f"gtk-launch {desktop_entry}", APP_ENV_OVERRIDES.get(key))
+    return None
+
+def _generate_variants(app_name: str) -> List[str]:
+    variants = {app_name.strip()}
+    variants.add(app_name.replace(' ', ''))
+    variants.add(app_name.replace(' ', '-'))
+    variants.add(app_name.replace(' ', '_'))
+    return [variant for variant in variants if variant]
+
+def resolve_generic_application(app_name: str) -> Optional[str]:
+    for variant in _generate_variants(app_name):
+        parts = variant.split()
+        executable = parts[0]
+        if shutil.which(executable):
+            return build_launch_command(variant)
+    desktop_entry = find_desktop_entry(app_name)
+    if desktop_entry and shutil.which('gtk-launch'):
+        return build_launch_command(f"gtk-launch {desktop_entry}")
+    return None
+
+def extract_app_name_from_query(query_lower: str) -> Optional[str]:
+    import re
+    match = re.search(r'(?:open|launch|start|run)\s+([a-z0-9 ._+-]+)', query_lower)
+    if not match:
+        return None
+    candidate = match.group(1)
+    # Stop at connector words
+    candidate = re.split(r'\b(?:please|now|for me|quickly|immediately)\b', candidate)[0]
+    candidate = candidate.strip()
+    candidate = candidate.rstrip(' .!,')
+    if not candidate or '.' in candidate:
+        return None  # Likely URL
+    words = candidate.split()
+    while words and words[0] in {'the', 'a', 'an', 'my'}:
+        words.pop(0)
+    candidate = " ".join(words).strip()
+    return candidate or None
+
 def detect_tool_intent(query: str) -> Optional[tuple[str, dict]]:
     """
     Detect if user query requires a tool based on keywords and patterns
@@ -168,96 +489,23 @@ def detect_tool_intent(query: str) -> Optional[tuple[str, dict]]:
                 search_encoded = search_query.replace(' ', '+')
                 return ('open_url', {'url': f'https://www.youtube.com/results?search_query={search_encoded}'})
     
-    # Detect desktop environment
-    import os
-    import subprocess
-    desktop_env = os.environ.get('XDG_CURRENT_DESKTOP', '').lower()
-    
-    # Terminal command based on DE
-    if 'kde' in desktop_env:
-        terminal_cmd = 'konsole &'
-        settings_cmd = 'systemsettings5 &'
-        file_manager_cmd = 'dolphin &'
-    elif 'xfce' in desktop_env:
-        terminal_cmd = 'xfce4-terminal &'
-        settings_cmd = 'xfce4-settings-manager &'
-        file_manager_cmd = 'thunar &'
-    elif 'mate' in desktop_env:
-        terminal_cmd = 'mate-terminal &'
-        settings_cmd = 'mate-control-center &'
-        file_manager_cmd = 'caja &'
-    elif 'lxde' in desktop_env or 'lxqt' in desktop_env:
-        terminal_cmd = 'lxterminal &'
-        settings_cmd = 'lxappearance &'
-        file_manager_cmd = 'pcmanfm &'
-    elif 'unity' in desktop_env:
-        # Unity: try x-terminal-emulator first (avoids snap issues), fallback to other terminals
-        terminal_cmd = 'x-terminal-emulator &'  
-        settings_cmd = 'unity-control-center &'  # Try unity first
-        file_manager_cmd = 'nautilus ~ &'
-    else:  # Default/GNOME or unknown
-        terminal_cmd = 'gnome-terminal &'
-        settings_cmd = 'gnome-control-center &'
-        file_manager_cmd = 'nautilus ~ &'
-    
-    # OS Application launches
-    app_mappings = {
-        # Editors & IDEs
-        'vscode': 'nohup code > /dev/null 2>&1 &',
-        'vs code': 'nohup code > /dev/null 2>&1 &',
-        'visual studio code': 'nohup code > /dev/null 2>&1 &',
-        'pycharm': 'nohup pycharm > /dev/null 2>&1 &',
-        'sublime': 'nohup subl > /dev/null 2>&1 &',
-        'atom': 'nohup atom > /dev/null 2>&1 &',
-        'arduino': 'nohup arduino > /dev/null 2>&1 &',
-        'arduino ide': 'nohup arduino > /dev/null 2>&1 &',
-        
-        # System tools
-        'terminal': terminal_cmd,
-        'file manager': file_manager_cmd,
-        'files': file_manager_cmd,
-        'system settings': settings_cmd,
-        'settings': settings_cmd,
-        'calculator': 'nohup gnome-calculator > /dev/null 2>&1 &',
-        'text editor': 'nohup gedit > /dev/null 2>&1 &',
-        'notepad': 'nohup gedit > /dev/null 2>&1 &',
-        
-        # Browsers
-        'firefox': 'nohup firefox > /dev/null 2>&1 &',
-        'chrome': 'nohup google-chrome > /dev/null 2>&1 &',
-        'chromium': 'nohup chromium-browser > /dev/null 2>&1 &',
-        'browser': 'nohup firefox > /dev/null 2>&1 &',
-        
-        # Communication
-        'whatsapp': 'nohup firefox https://web.whatsapp.com > /dev/null 2>&1 &',
-        'telegram': 'nohup telegram-desktop > /dev/null 2>&1 &',
-        'discord': 'nohup discord > /dev/null 2>&1 &',
-        'slack': 'nohup slack > /dev/null 2>&1 &',
-        'zoom': 'nohup zoom > /dev/null 2>&1 &',
-        
-        # Media
-        'spotify': 'nohup spotify > /dev/null 2>&1 &',
-        'vlc': 'nohup vlc > /dev/null 2>&1 &',
-        
-        # Other
-        'teamviewer': 'nohup teamviewer > /dev/null 2>&1 &',
-        'gimp': 'nohup gimp > /dev/null 2>&1 &',
-    }
-    
-    if any(word in query_lower for word in ['open', 'launch', 'start', 'run']):
-        for app_name, command in app_mappings.items():
-            if app_name in query_lower:
-                logger.info(f"Detected app launch: {app_name} -> {command}")
-                # Special handling for terminal and settings - try alternatives
-                if app_name == 'terminal':
-                    # Try multiple terminal options with nohup
-                    fallback_cmd = 'nohup x-terminal-emulator > /dev/null 2>&1 & || nohup xterm > /dev/null 2>&1 & || nohup konsole > /dev/null 2>&1 & || nohup gnome-terminal > /dev/null 2>&1 &'
-                    return ('run_command', {'command': fallback_cmd})
-                elif app_name in ['system settings', 'settings']:
-                    # Try multiple settings managers with nohup
-                    fallback_cmd = 'nohup gnome-control-center > /dev/null 2>&1 & || nohup unity-control-center > /dev/null 2>&1 & || nohup systemsettings5 > /dev/null 2>&1 & || nohup xfce4-settings-manager > /dev/null 2>&1 &'
-                    return ('run_command', {'command': fallback_cmd})
-                return ('run_command', {'command': command})
+    action_present = any(word in query_lower for word in ACTION_VERBS)
+    if action_present:
+        matched = False
+        for keyword, canonical in APP_KEYWORDS.items():
+            pattern = r'\b' + re.escape(keyword) + r'\b'
+            if re.search(pattern, query_lower):
+                matched = True
+                launch_command = resolve_known_application(canonical)
+                if launch_command:
+                    logger.info(f"Resolved application '{keyword}' to command '{launch_command}'")
+                    return ('run_command', {'command': launch_command})
+        generic_app = extract_app_name_from_query(query_lower)
+        if generic_app:
+            launch_command = resolve_generic_application(generic_app)
+            if launch_command:
+                logger.info(f"Resolved generic application '{generic_app}' to command '{launch_command}'")
+                return ('run_command', {'command': launch_command})
     
     # Regular URL (domain or full URL)
     if any(word in query_lower for word in ['open', 'launch', 'browse', 'go to', 'visit']):
@@ -287,9 +535,16 @@ def detect_tool_intent(query: str) -> Optional[tuple[str, dict]]:
         if match:
             return ('write_file', {'file_path': match.group(1), 'content': match.group(2)})
     
-    # List directory
-    if any(phrase in query_lower for phrase in ['list files', 'show files', 'list directory', 'ls']):
-        return ('list_directory', {'directory_path': '.'})
+    # List directory commands (avoid matching "ls" inside other words like "vlsi")
+    list_dir_phrases = ['list files', 'show files', 'list directory', 'list directories']
+    if any(phrase in query_lower for phrase in list_dir_phrases):
+        dir_match = re.search(r'(?:in|inside|under)\s+([\w./~-]+)', query_lower)
+        directory = dir_match.group(1) if dir_match else '.'
+        return ('list_directory', {'path': directory})
+    ls_match = re.search(r'\bls\b(?:\s+(?P<target>[\w./~-]+))?', query_lower)
+    if ls_match:
+        directory = ls_match.group('target') or '.'
+        return ('list_directory', {'path': directory})
     
     # Search files
     if 'search for' in query_lower and 'file' in query_lower:
@@ -323,6 +578,7 @@ async def generate_response(
     
     Yields text chunks suitable for streaming TTS
     """
+    gen_start = time.time()
     # Detect language if not provided
     if language is None:
         language = detect_language(user_query)
@@ -338,6 +594,7 @@ async def generate_response(
     
     # Add user query to history
     session.add_turn("user", user_query)
+    logger.debug(f"[Timing] Session setup: {time.time() - gen_start:.3f}s")
     
     # Check if user is asking about history/previous commands
     if any(phrase in user_query.lower() for phrase in ['what did i', 'previous', 'earlier', 'before', 'history', 'recall', 'remember']):
@@ -363,7 +620,9 @@ Provide a natural summary of what the user did or asked previously."""
     
     # Check for direct tool intent (pattern matching)
     if enable_tools:
+        tool_check_start = time.time()
         tool_intent = detect_tool_intent(user_query)
+        logger.debug(f"[Timing] Tool detection: {time.time() - tool_check_start:.3f}s")
         if tool_intent:
             tool_name, parameters = tool_intent
             logger.info(f"Detected tool intent: {tool_name} with params: {parameters}")
@@ -399,36 +658,38 @@ Provide a natural, conversational response explaining what was done and the resu
             return
     
     # Check if web search is needed
+    search_context = None
+    search_failure_note = None
     if needs_web_search(user_query) and settings.ENABLE_WEB_SEARCH:
+        search_start = time.time()
         logger.info(f"Web search requested: {user_query[:50]}")
         try:
             search_result = await perplexity.search(user_query)
+            logger.debug(f"[Timing] Web search: {time.time() - search_start:.3f}s")
             
             # Create context-aware prompt
-            messages = [
-                {
-                    "role": "system",
-                    "content": """You are JARVIS, a helpful AI assistant. Use the provided search results to answer accurately.
+            search_system_prompt = {
+                "role": "system",
+                "content": """You are JARVIS, a helpful AI assistant. Use the provided search results to answer accurately.
 
 IMPORTANT: Format your response as continuous flowing paragraphs. Never use bullet points, lists, or numbered steps. Write everything as connected sentences for smooth, natural speech."""
-                },
-                *session.get_history(last_n=5),  # Include context
-                {
-                    "role": "user",
-                    "content": f"""Search results for "{user_query}":
+            }
+            search_user_prompt = {
+                "role": "user",
+                "content": f"""Search results for \"{user_query}\":
 
 {search_result['answer']}
 
 Sources: {', '.join(search_result.get('citations', [])[:3])}
 
 Based on this information, provide a helpful answer."""
-                }
-            ]
+            }
+            search_context = (search_system_prompt, search_user_prompt)
         except Exception as e:
             logger.error(f"Search error: {e}")
-            messages = session.get_history()
-            messages.append({"role": "system", "content": "Search failed. Answer based on your knowledge."})
-    else:
+            search_failure_note = "Search failed. Answer based on your knowledge."
+
+    if search_context is None:
         # Build conversation context with optional tool support
         base_system_content = """You are JARVIS, an advanced AI assistant. Be helpful, accurate, and conversational.
 
@@ -440,6 +701,8 @@ IMPORTANT: Format ALL responses as continuous flowing paragraphs. Never use:
 Instead, write everything as connected sentences in paragraph form for smooth, natural speech flow. Explain concepts by weaving information together naturally, as if speaking to someone in conversation.
 
 Be concise for simple queries, detailed for complex ones. Always maintain context from previous conversation."""
+        if search_failure_note:
+            base_system_content += f"\n\n{search_failure_note}"
         
         # Add tool descriptions if enabled
         if enable_tools:
@@ -451,18 +714,49 @@ Be concise for simple queries, detailed for complex ones. Always maintain contex
             "role": "system",
             "content": base_system_content
         }
-        messages = [system_prompt] + session.get_history()
+    else:
+        system_prompt = None  # Not used in search mode
+
+    def build_messages():
+        if search_context:
+            system_msg, user_msg = search_context
+            history = session.get_history(last_n=5)
+            return [system_msg, *history, user_msg]
+        # Limit history to avoid exceeding the model context window
+        recent_history = session.get_history(last_n=settings.MAX_CONVERSATION_HISTORY)
+        approx_char_limit = calculate_max_prompt_chars()
+        trimmed_history = limit_history_for_context(recent_history, approx_char_limit)
+        return [system_prompt] + trimmed_history
+    
+    messages = build_messages()
     
     # Stream LLM response with adaptive parameters
     full_response = ""
-    async for sentence in llm.generate_stream(
-        messages, 
-        temperature=settings.LLM_TEMPERATURE,
-        max_tokens=max_tokens,
-        timeout=timeout
-    ):
-        full_response += sentence + " "
-        yield sentence
+    attempt = 0
+    max_attempts = 2
+    logger.debug(f"[Timing] Pre-LLM setup: {time.time() - gen_start:.3f}s")
+    while attempt < max_attempts:
+        messages = build_messages()
+        try:
+            async for sentence in llm.generate_stream(
+                messages,
+                temperature=settings.LLM_TEMPERATURE,
+                max_tokens=max_tokens,
+                timeout=timeout
+            ):
+                full_response += sentence + " "
+                yield sentence
+            break
+        except LLMContextExceededError as exc:
+            attempt += 1
+            logger.warning(f"LLM context exceeded (attempt {attempt}/{max_attempts}): {exc}")
+            session.clear_history()
+            session.add_turn("user", user_query)
+            full_response = ""
+            if attempt >= max_attempts:
+                yield "I reset our conversation to keep things fast. Please ask again."
+                return
+            continue
     
     # Check if LLM wants to call a tool
     if enable_tools:
@@ -582,23 +876,53 @@ async def voice_interaction(audio: UploadFile = File(...)):
             header += struct.pack('<4sIHHIIHH', b'fmt ', 16, 1, num_channels, sample_rate, byte_rate, block_align, bits_per_sample)
             header += struct.pack('<4sI', b'data', 0x7FFFFFFF)
             yield header
+            warmup_duration = 0.05  # 50ms of silence to wake speakers immediately
+            warmup_bytes = int(sample_rate * warmup_duration) * block_align
+            if warmup_bytes:
+                yield b'\x00' * warmup_bytes
+                logger.debug("Sent warmup silence chunk to prime audio pipeline")
             
             logger.info("Streaming: LLM generating → TTS converting → Audio playing in real-time...")
+            sentence_queue: asyncio.Queue = asyncio.Queue(maxsize=5)
+            stop_token = object()
+            
+            async def sentence_producer():
+                try:
+                    async for sentence in generate_response(user_text, None, detected_lang):
+                        await sentence_queue.put(sentence)
+                finally:
+                    await sentence_queue.put(stop_token)
+            
+            producer_task = asyncio.create_task(sentence_producer())
             sentence_count = 0
-            
-            # Stream: LLM generates sentence → IMMEDIATELY convert to audio → Stream audio
-            async for sentence in generate_response(user_text, None, detected_lang):
-                sentence_count += 1
-                logger.debug(f"Sentence {sentence_count}: {sentence[:60]}... → TTS")
-                
-                # Convert THIS sentence to audio IMMEDIATELY
-                async for audio_chunk in piper_tts.synthesize_stream_async(
-                    sentence, detected_lang, raw_pcm=True
-                ):
-                    yield audio_chunk
-            
-            total_time = time.time() - start_time
-            logger.info(f"Voice interaction complete: STT={stt_time:.2f}s, {sentence_count} sentences, Total={total_time:.2f}s")
+            first_chunk_logged = False
+            try:
+                while True:
+                    sentence = await sentence_queue.get()
+                    if sentence is stop_token:
+                        sentence_queue.task_done()
+                        break
+                    sentence_count += 1
+                    logger.debug(f"Sentence {sentence_count}: {sentence[:60]}... → TTS")
+                    async for audio_chunk in piper_tts.synthesize_stream_async(
+                        sentence, detected_lang, raw_pcm=True
+                    ):
+                        if audio_chunk and not first_chunk_logged:
+                            first_chunk_logged = True
+                            logger.info(
+                                f"First audio chunk sent {time.time() - start_time:.2f}s after user request"
+                            )
+                        yield audio_chunk
+                    sentence_queue.task_done()
+                total_time = time.time() - start_time
+                logger.info(
+                    f"Voice interaction complete: STT={stt_time:.2f}s, {sentence_count} sentences, Total={total_time:.2f}s"
+                )
+            finally:
+                if not producer_task.done():
+                    producer_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await producer_task
         
         return StreamingResponse(
             audio_stream_generator(),
@@ -631,16 +955,15 @@ async def voice_text_input(request: dict):
             raise HTTPException(status_code=400, detail="No text provided")
         
         logger.info(f"Text-to-voice query: {user_text}")
+        logger.debug(f"[Timing] Endpoint entry: 0.000s")
         
         # Auto-detect language (for future multi-language support)
         detected_lang = "en"  # Default to English for now
         
         # TRUE REAL-TIME: Stream LLM → TTS → Audio as sentences are generated!
         async def audio_stream_generator():
-            """Generate TRUE streaming: LLM generates sentence → TTS converts → Audio streams IMMEDIATELY"""
-            llm_start = time.time()
-            
-            # Create WAV header once (with placeholder size for streaming)
+            """Generate TRUE streaming: LLM sentences queue up while TTS streams audio"""
+            logger.debug(f"[Timing] Generator started: {time.time() - start_time:.3f}s")
             import struct
             sample_rate = 22050
             num_channels = 2
@@ -648,31 +971,56 @@ async def voice_text_input(request: dict):
             byte_rate = sample_rate * num_channels * bits_per_sample // 8
             block_align = num_channels * bits_per_sample // 8
             
-            # WAV header with max size (for streaming)
             header = struct.pack('<4sI4s', b'RIFF', 0x7FFFFFFF - 8, b'WAVE')
             header += struct.pack('<4sIHHIIHH', b'fmt ', 16, 1, num_channels, sample_rate, byte_rate, block_align, bits_per_sample)
             header += struct.pack('<4sI', b'data', 0x7FFFFFFF)
             yield header
+            warmup_duration = 0.05
+            warmup_bytes = int(sample_rate * warmup_duration) * block_align
+            if warmup_bytes:
+                yield b'\x00' * warmup_bytes
+                logger.debug("Sent warmup silence chunk to prime audio pipeline")
             
             logger.info("Streaming: LLM generating → TTS converting → Audio playing in real-time...")
-            sentence_count = 0
-            
-            # Stream: LLM generates sentence → IMMEDIATELY convert to audio → Stream audio
-            # User hears first sentence while LLM is still generating remaining sentences!
-            # Use a consistent session ID for text-to-voice to maintain memory
+            sentence_queue: asyncio.Queue = asyncio.Queue(maxsize=5)
+            stop_token = object()
             text_session_id = request.get("session_id", "text-to-voice-session")
-            async for sentence in generate_response(user_text, text_session_id, detected_lang):
-                sentence_count += 1
-                logger.debug(f"Sentence {sentence_count}: {sentence[:60]}... → TTS")
-                
-                # Convert THIS sentence to audio IMMEDIATELY (don't wait for more sentences!)
-                async for audio_chunk in piper_tts.synthesize_stream_async(
-                    sentence, detected_lang, raw_pcm=True
-                ):
-                    yield audio_chunk
             
-            total_time = time.time() - start_time
-            logger.info(f"Text-to-voice complete: {sentence_count} sentences, Total={total_time:.2f}s")
+            async def sentence_producer():
+                try:
+                    async for sentence in generate_response(user_text, text_session_id, detected_lang):
+                        await sentence_queue.put(sentence)
+                finally:
+                    await sentence_queue.put(stop_token)
+            
+            producer_task = asyncio.create_task(sentence_producer())
+            sentence_count = 0
+            first_chunk_logged = False
+            try:
+                while True:
+                    sentence = await sentence_queue.get()
+                    if sentence is stop_token:
+                        sentence_queue.task_done()
+                        break
+                    sentence_count += 1
+                    logger.debug(f"Sentence {sentence_count}: {sentence[:60]}... → TTS")
+                    async for audio_chunk in piper_tts.synthesize_stream_async(
+                        sentence, detected_lang, raw_pcm=True
+                    ):
+                        if audio_chunk and not first_chunk_logged:
+                            first_chunk_logged = True
+                            logger.info(
+                                f"First audio chunk sent {time.time() - start_time:.2f}s after request"
+                            )
+                        yield audio_chunk
+                    sentence_queue.task_done()
+                total_time = time.time() - start_time
+                logger.info(f"Text-to-voice complete: {sentence_count} sentences, Total={total_time:.2f}s")
+            finally:
+                if not producer_task.done():
+                    producer_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await producer_task
         
         return StreamingResponse(
             audio_stream_generator(),
@@ -949,22 +1297,43 @@ async def voice_stream(request: TextRequest):
             header += struct.pack('<4sI', b'data', 0xFFFFFFFF)
             
             yield header
+            warmup_duration = 0.05
+            warmup_bytes = int(sample_rate * warmup_duration) * block_align
+            if warmup_bytes:
+                yield b'\x00' * warmup_bytes
+                logger.debug("Sent warmup silence chunk to prime audio pipeline")
             logger.info("WAV header sent, starting sentence-by-sentence synthesis...")
             
-            sentence_count = 0
-            # Stream: LLM generates sentence -> TTS converts -> Audio streams immediately
-            async for sentence in generate_response(request.text, request.session_id, detected_lang):
-                sentence_count += 1
-                logger.info(f"Sentence {sentence_count}: {sentence[:60]}...")
-                
-                # Convert THIS sentence to audio immediately (don't wait for more sentences!)
-                # Use raw_pcm=True to get only PCM data (no WAV header for each sentence)
-                async for audio_chunk in piper_tts.synthesize_stream_async(sentence, detected_lang, raw_pcm=True):
-                    yield audio_chunk
-                
-                logger.debug(f"Sentence {sentence_count} audio streamed")
+            sentence_queue: asyncio.Queue = asyncio.Queue(maxsize=5)
+            stop_token = object()
             
-            logger.info(f"Streaming complete: {sentence_count} sentences")
+            async def sentence_producer():
+                try:
+                    async for sentence in generate_response(request.text, request.session_id, detected_lang):
+                        await sentence_queue.put(sentence)
+                finally:
+                    await sentence_queue.put(stop_token)
+            
+            producer_task = asyncio.create_task(sentence_producer())
+            sentence_count = 0
+            try:
+                while True:
+                    sentence = await sentence_queue.get()
+                    if sentence is stop_token:
+                        sentence_queue.task_done()
+                        break
+                    sentence_count += 1
+                    logger.info(f"Sentence {sentence_count}: {sentence[:60]}...")
+                    async for audio_chunk in piper_tts.synthesize_stream_async(sentence, detected_lang, raw_pcm=True):
+                        yield audio_chunk
+                    logger.debug(f"Sentence {sentence_count} audio streamed")
+                    sentence_queue.task_done()
+                logger.info(f"Streaming complete: {sentence_count} sentences")
+            finally:
+                if not producer_task.done():
+                    producer_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await producer_task
                     
         except Exception as e:
             logger.error(f"Voice stream error: {e}")

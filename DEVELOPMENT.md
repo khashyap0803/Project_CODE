@@ -458,4 +458,119 @@ server {
 
 ---
 
+## Performance Optimizations (Version 2.0)
+
+### Audio Latency Optimization (<2s Target)
+
+**Goal:** Achieve sub-2-second end-to-end latency from user input to first audible speech.
+
+#### 1. PipeWire/PulseAudio Auto-Suspend Disabled
+
+**Problem:** Audio devices suspend after inactivity, causing 1-3s wakeup delays.
+
+**Solution:** Created `~/.config/pipewire/pipewire-pulse.conf.d/10-no-suspend.conf`:
+```conf
+context.exec = [
+    { path = "pactl" args = "load-module module-suspend-on-idle timeout=0" }
+]
+```
+
+**Result:** Audio devices stay active, eliminating wakeup delays.
+
+#### 2. Client Audio Pre-Warming
+
+**Changes in `jarvis.py`:**
+```python
+# Initialize with small buffer for low latency
+output_stream = p.open(
+    format=pyaudio.paInt16,
+    channels=2,
+    rate=22050,
+    output=True,
+    frames_per_buffer=256,  # Reduced from 1024 (4x lower latency)
+    start=True
+)
+
+# Pre-warm device with silence
+silence = b'\x00' * (256 * 2 * 2)
+output_stream.write(silence)
+
+# Keep device active before each request
+warmup_silence = b'\x00' * 128
+output_stream.write(warmup_silence)
+```
+
+**Result:** Device ready immediately, no initialization lag on first audio.
+
+#### 3. Non-Blocking Application Launches
+
+**Problem:** GUI applications (Settings, Arduino IDE, RustDesk) blocked until closed.
+
+**Solution in `tools/tool_system.py`:**
+```python
+# Detect background launch commands
+is_background_launch = command.strip().endswith('&') and 'nohup' in command
+
+if is_background_launch:
+    # Use Popen instead of run() - returns immediately
+    process = subprocess.Popen(
+        command,
+        shell=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True  # Detach from parent
+    )
+    return {"success": True, "pid": process.pid}
+```
+
+**Result:** Applications launch in background, JARVIS responds immediately.
+
+### Measured Performance
+
+**Server-Side (from DEBUG logs):**
+- Session setup: 0.000s
+- Tool detection: 0.000s
+- Pre-LLM: 0.001s
+- **First audio chunk: 0.33-0.41s** ✅
+- Total processing: 0.65-1.5s
+
+**Client-Side:**
+- Audio device init: 0.005-0.007s (one-time)
+- Network latency: 0.003s
+- First write: 0.041s
+- **Total client latency: <0.05s** ✅
+
+**End-to-End: < 0.5 seconds** (Target: <2s) ✅✅✅
+
+### Debugging Latency Issues
+
+If latency returns in future:
+
+1. **Enable debug logging:**
+   ```python
+   # core/config.py
+   LOG_LEVEL = "DEBUG"
+   ```
+
+2. **Check timing markers:**
+   ```bash
+   tail -f logs/jarvis.log | grep "\[Timing\]"
+   ```
+
+3. **Verify PipeWire config:**
+   ```bash
+   cat ~/.config/pipewire/pipewire-pulse.conf.d/10-no-suspend.conf
+   pactl list modules | grep suspend-on-idle
+   ```
+
+4. **Test background launch detection:**
+   ```bash
+   tail -f logs/jarvis.log | grep "BACKGROUND LAUNCH"
+   ```
+
+See `TROUBLESHOOTING.md` for complete diagnostic procedures.
+
+---
+
 **Note:** This is a living document. Update as new features are added or architecture changes.

@@ -140,7 +140,33 @@ class CodeExecutor:
             
             logger.info(f"Executing system command: {command[:50]}...")
             
-            # Execute command
+            # Detect if this is an app launch command (contains nohup ... &)
+            # For app launches, use Popen to avoid blocking
+            is_background_launch = command.strip().endswith('&') and 'nohup' in command
+            
+            if is_background_launch:
+                # Launch app in background without blocking
+                logger.info("Detected background app launch - using non-blocking execution")
+                process = subprocess.Popen(
+                    command,
+                    shell=shell,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,  # Detach from parent process
+                    cwd=os.getcwd()
+                )
+                # Don't wait for the process - return immediately
+                return {
+                    "success": True,
+                    "stdout": f"Application launched in background (PID: {process.pid})",
+                    "stderr": "",
+                    "return_code": 0,
+                    "error": None,
+                    "pid": process.pid
+                }
+            
+            # For regular commands, use blocking execution
             result = subprocess.run(
                 command,
                 capture_output=True,

@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     LLM_API_URL: str = "http://localhost:8080/v1/chat/completions"
     LLM_MODEL_NAME: str = "mistral-small"
     LLM_MAX_CONTEXT: int = 8192
+    LLM_SERVER_MAX_CONTEXT: int = 2048  # Actual upstream limit
     LLM_TEMPERATURE: float = 0.7
     LLM_TOP_P: float = 0.9
     LLM_STREAM: bool = True
@@ -85,7 +86,7 @@ class Settings(BaseSettings):
     ENABLE_INTERRUPTION: bool = True
     
     # === Logging ===
-    LOG_LEVEL: str = "INFO"
+    LOG_LEVEL: str = "DEBUG"
     LOG_FORMAT: str = "%(asctime)s | %(name)s | %(levelname)s | %(message)s"
     
     class Config:

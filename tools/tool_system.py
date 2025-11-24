@@ -196,8 +196,35 @@ class RunCommandTool(Tool):
     
     async def execute(self, command: str, timeout: int = 30) -> Dict[str, Any]:
         try:
-            logger.info(f"Executing command: {command}")
+            # Detect if this is an app launch command (contains nohup ... &)
+            # For app launches, use Popen to avoid blocking
+            ends_with_amp = command.strip().endswith('&')
+            has_nohup = 'nohup' in command
+            is_background_launch = ends_with_amp and has_nohup
             
+            logger.info(f"Executing command: {command[:100]}... | ends_with_amp={ends_with_amp}, has_nohup={has_nohup}, is_background={is_background_launch}")
+            
+            if is_background_launch:
+                # Launch app in background without blocking
+                logger.warning(f"🚀 BACKGROUND LAUNCH DETECTED - Non-blocking execution for: {command[:80]}")
+                process = subprocess.Popen(
+                    command,
+                    shell=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True  # Detach from parent process
+                )
+                # Don't wait for the process - return immediately
+                return {
+                    "success": True,
+                    "stdout": f"Application launched in background (PID: {process.pid})",
+                    "stderr": "",
+                    "return_code": 0,
+                    "command": command
+                }
+            
+            # For regular commands, use blocking execution
             result = subprocess.run(
                 command,
                 shell=True,

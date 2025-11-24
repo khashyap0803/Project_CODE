@@ -11,6 +11,11 @@ from core.logger import setup_logger
 
 logger = setup_logger(__name__)
 
+
+class LLMContextExceededError(Exception):
+    """Raised when the upstream LLM refuses a request due to context size"""
+    pass
+
 # Simple query detection keywords
 SIMPLE_KEYWORDS = ['what is', 'who is', 'calculate', 'plus', 'minus', 'times', 'divided']
 DETAILED_KEYWORDS = ['explain', 'describe', 'how does', 'tell me about', 'detail']
@@ -50,6 +55,7 @@ class StreamingLLM:
         self.sentence_buffer = ""
         # Sentence boundary patterns
         self.sentence_endings = re.compile(r'([.!?])\s+')
+        self.forced_sentence_chars = getattr(settings, "LLM_FORCED_SENTENCE_CHARS", 120)
         logger.info(f"StreamingLLM initialized (model: {self.model})")
     
     def format_tools_for_prompt(self, tools: List[Dict]) -> str:
@@ -144,6 +150,8 @@ After the tool executes, you'll receive the result and should respond naturally 
                     if response.status != 200:
                         error = await response.text()
                         logger.error(f"LLM API error {response.status}: {error}")
+                        if "context" in error.lower():
+                            raise LLMContextExceededError(error)
                         yield "I'm having trouble generating a response."
                         return
                     
@@ -176,12 +184,24 @@ After the tool executes, you'll receive the result and should respond naturally 
                                     self.sentence_buffer += content
                                     
                                     # Check for sentence boundaries
-                                    sentences = self._extract_sentences(self.sentence_buffer)
+                                    sentences = self._extract_complete_sentences()
                                     for sentence in sentences:
                                         # Clean text for TTS (remove markdown, special chars)
                                         clean_sentence = clean_text_for_tts(sentence)
                                         if clean_sentence:  # Only yield non-empty sentences
                                             logger.debug(f"Yielding sentence: {clean_sentence[:50]}")
+                                            yield clean_sentence
+
+                                    # Force partial chunk if buffer grows too large without punctuation
+                                    while len(self.sentence_buffer) >= self.forced_sentence_chars:
+                                        forced_sentence = self._extract_forced_sentence()
+                                        if not forced_sentence:
+                                            break
+                                        clean_sentence = clean_text_for_tts(forced_sentence)
+                                        if clean_sentence:
+                                            logger.debug(
+                                                f"Yielding forced sentence: {clean_sentence[:50]}"
+                                            )
                                             yield clean_sentence
                                     
                         except json.JSONDecodeError:
@@ -198,35 +218,31 @@ After the tool executes, you'll receive the result and should respond naturally 
             logger.error(f"LLM stream error: {e}")
             yield f"Error generating response: {str(e)}"
     
-    def _extract_sentences(self, text: str) -> List[str]:
-        """
-        Extract complete sentences from buffer
-        Updates buffer to keep incomplete sentence
-        
-        Returns:
-            List of complete sentences
-        """
-        sentences = []
-        
-        # Find sentence boundaries
-        matches = list(self.sentence_endings.finditer(text))
-        
-        if not matches:
-            return sentences
-        
-        # Get last sentence boundary
-        last_match = matches[-1]
-        boundary_pos = last_match.end()
-        
-        # Extract complete sentences
-        complete_text = text[:boundary_pos].strip()
-        if complete_text:
-            sentences.append(complete_text)
-        
-        # Keep remaining text in buffer
-        self.sentence_buffer = text[boundary_pos:].strip()
-        
+    
+    def _extract_complete_sentences(self) -> List[str]:
+        """Extract and remove all complete sentences ending with punctuation."""
+        sentences: List[str] = []
+        while True:
+            match = self.sentence_endings.search(self.sentence_buffer)
+            if not match:
+                break
+            boundary = match.end()
+            sentence = self.sentence_buffer[:boundary].strip()
+            if sentence:
+                sentences.append(sentence)
+            self.sentence_buffer = self.sentence_buffer[boundary:].lstrip()
         return sentences
+
+    def _extract_forced_sentence(self) -> Optional[str]:
+        """Force flush part of the buffer when no punctuation appears quickly."""
+        if len(self.sentence_buffer) < self.forced_sentence_chars:
+            return None
+        split_index = self.sentence_buffer.rfind(' ', 0, self.forced_sentence_chars)
+        if split_index == -1:
+            split_index = self.forced_sentence_chars
+        sentence = self.sentence_buffer[:split_index].strip()
+        self.sentence_buffer = self.sentence_buffer[split_index:].lstrip()
+        return sentence or None
     
     async def generate_complete(
         self,
