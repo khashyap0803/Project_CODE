@@ -1,0 +1,82 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+env/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+logs/
+agent.log
+
+# Audio files (test outputs)
+*.wav
+*.mp3
+!piper-data/*.onnx
+output*.wav
+test*.wav
+final*.wav
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+
+# Model data (too large for git)
+whisper-data/
+vector_db/
+piper-data/*.onnx
+
+# Keep model config files
+!piper-data/*.json
+
+# Archives
+_archive*/
+*.tar.gz
+*.zip
+
+# Environment variables
+.env
+.env.local
+
+# System
+nohup.out
+
+# PyCharm
+.idea/
+
+# Database
+*.db
+*.sqlite
+
+# Cache
+.cache/
+*.cache
