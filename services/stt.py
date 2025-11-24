@@ -68,11 +68,11 @@ class WhisperSTT:
                 beam_size=settings.WHISPER_BEAM_SIZE,
                 vad_filter=True,  # Voice activity detection
                 vad_parameters=dict(
-                    min_silence_duration_ms=500,
-                    threshold=0.5
+                    min_silence_duration_ms=1000,  # 1 second of silence
+                    threshold=0.3  # Lower threshold = more sensitive to speech
                 ),
                 # Optimize for supported languages
-                language_detection_threshold=0.5
+                language_detection_threshold=0.3  # Lower = more lenient detection
             )
             
             # Combine segments

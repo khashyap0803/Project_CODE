@@ -18,10 +18,21 @@ from core.logger import setup_logger
 from core.session import session_manager
 from services import whisper_stt, llm
 from services.tts_hybrid import tts_service as piper_tts
-from tools import perplexity
+from tools import perplexity, tool_manager
 from tools.code_executor import execute_code, run_command, get_system_status, manage_file
 
+# Setup logger first
 logger = setup_logger(__name__)
+
+# Try to import browser automation (Selenium)
+try:
+    from tools.browser_automation import browser_tool
+    BROWSER_AUTOMATION_AVAILABLE = True
+    logger.info("Browser automation (Selenium) available")
+except Exception as e:
+    browser_tool = None
+    BROWSER_AUTOMATION_AVAILABLE = False
+    logger.warning(f"Browser automation not available: {e}")
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -106,13 +117,209 @@ def detect_language(text: str) -> str:
             return "hi"
     return "en"  # Default to English
 
+def detect_tool_intent(query: str) -> Optional[tuple[str, dict]]:
+    """
+    Detect if user query requires a tool based on keywords and patterns
+    Returns (tool_name, parameters) or None
+    """
+    query_lower = query.lower().strip()
+    import re
+    
+    # Google search with query (e.g., "open google and search for X", "search for X in google")
+    google_patterns = [
+        r'(?:open|go to|search)\s+(?:in\s+)?google\s+(?:and\s+)?(?:search\s+for\s+)(.+)',
+        r'search\s+for\s+(.+?)\s+in\s+google',
+        r'google\s+search\s+(.+)',
+        r'google\s+(.+)',
+    ]
+    for pattern in google_patterns:
+        match = re.search(pattern, query_lower)
+        if match and 'google' in query_lower:
+            search_query = match.group(1).strip()
+            # Remove trailing noise
+            search_query = re.sub(r'\s+on\s+google.*$', '', search_query)
+            search_encoded = search_query.replace(' ', '+')
+            return ('open_url', {'url': f'https://www.google.com/search?q={search_encoded}'})
+    
+    # YouTube with search query (e.g., "open kantha song in youtube", "play X on youtube")
+    youtube_patterns = [
+        r'(?:open|play|search|find)\s+(.+?)\s+(?:in|on)\s+youtube',
+        r'youtube\s+(.+)',
+        r'(?:open|play)\s+(.+?)\s+(?:youtube|yt)',
+    ]
+    for pattern in youtube_patterns:
+        match = re.search(pattern, query_lower)
+        if match and 'youtube' in query_lower:
+            search_query = match.group(1).strip()
+            # Remove "and play/watch" phrases completely
+            search_query = re.sub(r'(^|\s+)and\s+(play|watch|see|show)(\s+|$)', ' ', search_query).strip()
+            # Remove "youtube" and "yt" from query
+            search_query = re.sub(r'\s+(in|on)\s+youtube.*$', '', search_query)
+            search_query = re.sub(r'youtube\s+', '', search_query).strip()
+            
+            # Check if user wants autoplay
+            wants_autoplay = any(word in query_lower for word in ['play', 'watch'])
+            
+            if wants_autoplay and BROWSER_AUTOMATION_AVAILABLE:
+                # Use Selenium for autoplay (finds and clicks first non-sponsored video)
+                return ('youtube_autoplay', {'search_query': search_query})
+            else:
+                # Just open search results
+                search_encoded = search_query.replace(' ', '+')
+                return ('open_url', {'url': f'https://www.youtube.com/results?search_query={search_encoded}'})
+    
+    # Detect desktop environment
+    import os
+    import subprocess
+    desktop_env = os.environ.get('XDG_CURRENT_DESKTOP', '').lower()
+    
+    # Terminal command based on DE
+    if 'kde' in desktop_env:
+        terminal_cmd = 'konsole &'
+        settings_cmd = 'systemsettings5 &'
+        file_manager_cmd = 'dolphin &'
+    elif 'xfce' in desktop_env:
+        terminal_cmd = 'xfce4-terminal &'
+        settings_cmd = 'xfce4-settings-manager &'
+        file_manager_cmd = 'thunar &'
+    elif 'mate' in desktop_env:
+        terminal_cmd = 'mate-terminal &'
+        settings_cmd = 'mate-control-center &'
+        file_manager_cmd = 'caja &'
+    elif 'lxde' in desktop_env or 'lxqt' in desktop_env:
+        terminal_cmd = 'lxterminal &'
+        settings_cmd = 'lxappearance &'
+        file_manager_cmd = 'pcmanfm &'
+    elif 'unity' in desktop_env:
+        # Unity: try x-terminal-emulator first (avoids snap issues), fallback to other terminals
+        terminal_cmd = 'x-terminal-emulator &'  
+        settings_cmd = 'unity-control-center &'  # Try unity first
+        file_manager_cmd = 'nautilus ~ &'
+    else:  # Default/GNOME or unknown
+        terminal_cmd = 'gnome-terminal &'
+        settings_cmd = 'gnome-control-center &'
+        file_manager_cmd = 'nautilus ~ &'
+    
+    # OS Application launches
+    app_mappings = {
+        # Editors & IDEs
+        'vscode': 'nohup code > /dev/null 2>&1 &',
+        'vs code': 'nohup code > /dev/null 2>&1 &',
+        'visual studio code': 'nohup code > /dev/null 2>&1 &',
+        'pycharm': 'nohup pycharm > /dev/null 2>&1 &',
+        'sublime': 'nohup subl > /dev/null 2>&1 &',
+        'atom': 'nohup atom > /dev/null 2>&1 &',
+        'arduino': 'nohup arduino > /dev/null 2>&1 &',
+        'arduino ide': 'nohup arduino > /dev/null 2>&1 &',
+        
+        # System tools
+        'terminal': terminal_cmd,
+        'file manager': file_manager_cmd,
+        'files': file_manager_cmd,
+        'system settings': settings_cmd,
+        'settings': settings_cmd,
+        'calculator': 'nohup gnome-calculator > /dev/null 2>&1 &',
+        'text editor': 'nohup gedit > /dev/null 2>&1 &',
+        'notepad': 'nohup gedit > /dev/null 2>&1 &',
+        
+        # Browsers
+        'firefox': 'nohup firefox > /dev/null 2>&1 &',
+        'chrome': 'nohup google-chrome > /dev/null 2>&1 &',
+        'chromium': 'nohup chromium-browser > /dev/null 2>&1 &',
+        'browser': 'nohup firefox > /dev/null 2>&1 &',
+        
+        # Communication
+        'whatsapp': 'nohup firefox https://web.whatsapp.com > /dev/null 2>&1 &',
+        'telegram': 'nohup telegram-desktop > /dev/null 2>&1 &',
+        'discord': 'nohup discord > /dev/null 2>&1 &',
+        'slack': 'nohup slack > /dev/null 2>&1 &',
+        'zoom': 'nohup zoom > /dev/null 2>&1 &',
+        
+        # Media
+        'spotify': 'nohup spotify > /dev/null 2>&1 &',
+        'vlc': 'nohup vlc > /dev/null 2>&1 &',
+        
+        # Other
+        'teamviewer': 'nohup teamviewer > /dev/null 2>&1 &',
+        'gimp': 'nohup gimp > /dev/null 2>&1 &',
+    }
+    
+    if any(word in query_lower for word in ['open', 'launch', 'start', 'run']):
+        for app_name, command in app_mappings.items():
+            if app_name in query_lower:
+                logger.info(f"Detected app launch: {app_name} -> {command}")
+                # Special handling for terminal and settings - try alternatives
+                if app_name == 'terminal':
+                    # Try multiple terminal options with nohup
+                    fallback_cmd = 'nohup x-terminal-emulator > /dev/null 2>&1 & || nohup xterm > /dev/null 2>&1 & || nohup konsole > /dev/null 2>&1 & || nohup gnome-terminal > /dev/null 2>&1 &'
+                    return ('run_command', {'command': fallback_cmd})
+                elif app_name in ['system settings', 'settings']:
+                    # Try multiple settings managers with nohup
+                    fallback_cmd = 'nohup gnome-control-center > /dev/null 2>&1 & || nohup unity-control-center > /dev/null 2>&1 & || nohup systemsettings5 > /dev/null 2>&1 & || nohup xfce4-settings-manager > /dev/null 2>&1 &'
+                    return ('run_command', {'command': fallback_cmd})
+                return ('run_command', {'command': command})
+    
+    # Regular URL (domain or full URL)
+    if any(word in query_lower for word in ['open', 'launch', 'browse', 'go to', 'visit']):
+        # Extract URL or domain
+        url_match = re.search(r'(https?://[^\s]+|[\w-]+\.(?:com|org|net|io|co|in|edu|gov)(?:/[^\s]*)?)', query_lower)
+        if url_match:
+            url = url_match.group(0)
+            if not url.startswith('http'):
+                url = f'https://{url}'
+            return ('open_url', {'url': url})
+    
+    # System status
+    if any(phrase in query_lower for phrase in ['system status', 'cpu usage', 'ram', 'memory', 'disk space', 'check system']):
+        return ('get_system_status', {})
+    
+    # Read file
+    if 'read file' in query_lower or 'show file' in query_lower or 'cat file' in query_lower:
+        # Extract filename
+        file_match = re.search(r'(?:read|show|cat)\s+file\s+([^\s]+)', query_lower)
+        if file_match:
+            return ('read_file', {'file_path': file_match.group(1)})
+    
+    # Create/write file
+    if 'create file' in query_lower or 'write file' in query_lower:
+        # Extract: "create file X with Y"
+        match = re.search(r'(?:create|write)\s+file\s+([^\s]+)\s+with\s+(.+)', query_lower)
+        if match:
+            return ('write_file', {'file_path': match.group(1), 'content': match.group(2)})
+    
+    # List directory
+    if any(phrase in query_lower for phrase in ['list files', 'show files', 'list directory', 'ls']):
+        return ('list_directory', {'directory_path': '.'})
+    
+    # Search files
+    if 'search for' in query_lower and 'file' in query_lower:
+        match = re.search(r'search for\s+(.+?)\s+file', query_lower)
+        if match:
+            pattern = match.group(1).strip()
+            return ('search_files', {'pattern': f'*{pattern}*'})
+    
+    # Run command (explicit)
+    if 'run command' in query_lower:
+        match = re.search(r'run command\s+(.+)', query_lower)
+        if match:
+            return ('run_command', {'command': match.group(1)})
+    
+    return None
+
 async def generate_response(
     user_query: str,
     session_id: Optional[str] = None,
-    language: Optional[str] = None
+    language: Optional[str] = None,
+    enable_tools: bool = True
 ):
     """
-    Generate intelligent response with tool routing and language support
+    Generate intelligent response with tool routing, tool calling, and language support
+    
+    Args:
+        user_query: User's question/command
+        session_id: Session identifier for context
+        language: Language code (auto-detect if None)
+        enable_tools: Whether to enable tool calling (default: True)
     
     Yields text chunks suitable for streaming TTS
     """
@@ -131,6 +338,65 @@ async def generate_response(
     
     # Add user query to history
     session.add_turn("user", user_query)
+    
+    # Check if user is asking about history/previous commands
+    if any(phrase in user_query.lower() for phrase in ['what did i', 'previous', 'earlier', 'before', 'history', 'recall', 'remember']):
+        history = session.get_history()
+        if history:
+            history_text = "\n".join([f"{turn['role']}: {turn['content']}" for turn in history[-10:]])  # Last 10 turns
+            tool_context = {
+                "role": "user",
+                "content": f"""The user asked: "{user_query}"
+
+Here is the recent conversation history:
+{history_text}
+
+Provide a natural summary of what the user did or asked previously."""
+            }
+            messages = [
+                {"role": "system", "content": "You are JARVIS. Summarize the conversation history naturally."},
+                tool_context
+            ]
+            async for sentence in llm.generate_stream(messages, temperature=0.7, max_tokens=300):
+                yield sentence
+            return
+    
+    # Check for direct tool intent (pattern matching)
+    if enable_tools:
+        tool_intent = detect_tool_intent(user_query)
+        if tool_intent:
+            tool_name, parameters = tool_intent
+            logger.info(f"Detected tool intent: {tool_name} with params: {parameters}")
+            
+            # Special handling for youtube_autoplay using Selenium
+            if tool_name == 'youtube_autoplay' and BROWSER_AUTOMATION_AVAILABLE:
+                tool_result = await browser_tool.youtube_autoplay(parameters['search_query'])
+                logger.info(f"YouTube autoplay result: {tool_result}")
+            else:
+                # Execute tool through tool_manager
+                tool_result = await tool_manager.execute_tool(tool_name, parameters)
+                logger.info(f"Tool result: {tool_result}")
+            
+            # Generate natural response with tool result
+            tool_context = {
+                "role": "user",
+                "content": f"""The user asked: "{user_query}"
+
+I executed the {tool_name} tool and got this result:
+{json.dumps(tool_result, indent=2)}
+
+Provide a natural, conversational response explaining what was done and the result. Be concise but helpful."""
+            }
+            
+            messages = [
+                {"role": "system", "content": "You are JARVIS. Explain tool results naturally and conversationally."},
+                tool_context
+            ]
+            
+            async for sentence in llm.generate_stream(messages, temperature=0.7, max_tokens=300):
+                yield sentence
+            
+            return
     
     # Check if web search is needed
     if needs_web_search(user_query) and settings.ENABLE_WEB_SEARCH:
@@ -163,10 +429,8 @@ Based on this information, provide a helpful answer."""
             messages = session.get_history()
             messages.append({"role": "system", "content": "Search failed. Answer based on your knowledge."})
     else:
-        # Build conversation context
-        system_prompt = {
-            "role": "system",
-            "content": """You are JARVIS, an advanced AI assistant. Be helpful, accurate, and conversational.
+        # Build conversation context with optional tool support
+        base_system_content = """You are JARVIS, an advanced AI assistant. Be helpful, accurate, and conversational.
 
 IMPORTANT: Format ALL responses as continuous flowing paragraphs. Never use:
 - Bullet points or lists (•, -, *, numbers)
@@ -176,6 +440,16 @@ IMPORTANT: Format ALL responses as continuous flowing paragraphs. Never use:
 Instead, write everything as connected sentences in paragraph form for smooth, natural speech flow. Explain concepts by weaving information together naturally, as if speaking to someone in conversation.
 
 Be concise for simple queries, detailed for complex ones. Always maintain context from previous conversation."""
+        
+        # Add tool descriptions if enabled
+        if enable_tools:
+            tools = [tool.to_dict() for tool in tool_manager.get_all_tools()]
+            tool_prompt = llm.format_tools_for_prompt(tools)
+            base_system_content += tool_prompt
+        
+        system_prompt = {
+            "role": "system",
+            "content": base_system_content
         }
         messages = [system_prompt] + session.get_history()
     
@@ -190,7 +464,51 @@ Be concise for simple queries, detailed for complex ones. Always maintain contex
         full_response += sentence + " "
         yield sentence
     
-    # Add assistant response to history
+    # Check if LLM wants to call a tool
+    if enable_tools:
+        logger.debug(f"Full LLM response for tool detection: {full_response}")
+        tool_call = llm.extract_tool_call(full_response)
+        
+        if tool_call:
+            logger.info(f"Tool call detected: {tool_call['tool']}")
+            
+            # Execute the tool
+            tool_result = await tool_manager.execute_tool(
+                tool_call['tool'],
+                tool_call.get('parameters', {})
+            )
+            
+            logger.info(f"Tool result: {tool_result}")
+            
+            # Add tool result to conversation and get final response
+            tool_message = {
+                "role": "assistant",
+                "content": f"Tool executed. Result: {json.dumps(tool_result)}"
+            }
+            messages.append(tool_message)
+            
+            user_follow_up = {
+                "role": "user",
+                "content": "Based on this tool result, provide your final answer to my original question in a natural, conversational way."
+            }
+            messages.append(user_follow_up)
+            
+            # Get final response after tool execution
+            final_response = ""
+            async for sentence in llm.generate_stream(
+                messages,
+                temperature=settings.LLM_TEMPERATURE,
+                max_tokens=max_tokens,
+                timeout=timeout
+            ):
+                final_response += sentence + " "
+                yield sentence
+            
+            # Add final response to history
+            session.add_turn("assistant", final_response.strip())
+            return
+    
+    # Add assistant response to history (if no tool was called)
     session.add_turn("assistant", full_response.strip())
 
 # === API Endpoints ===
@@ -200,14 +518,175 @@ async def health_check():
     """Health check endpoint"""
     return {
         "status": "healthy",
-        "version": "2.0.0",
+        "version": "3.0.0-phase1",
         "services": {
             "whisper": "loaded",
             "piper": "loaded",
             "llm": "ready",
-            "perplexity": "configured" if settings.ENABLE_WEB_SEARCH else "disabled"
+            "perplexity": "configured" if settings.ENABLE_WEB_SEARCH else "disabled",
+            "tools": f"{len(tool_manager.get_all_tools())} tools available"
         }
     }
+
+@app.post("/api/voice")
+async def voice_interaction(audio: UploadFile = File(...)):
+    """
+    PRIMARY VOICE INTERFACE - Audio in, Audio out
+    
+    This is the main way to interact with JARVIS:
+    1. Upload audio file (your voice question)
+    2. JARVIS transcribes it (STT)
+    3. JARVIS processes with LLM
+    4. JARVIS responds with audio stream (TTS)
+    
+    Returns: Streaming audio (WAV format)
+    """
+    try:
+        start_time = time.time()
+        
+        # Step 1: Transcribe audio
+        audio_bytes = await audio.read()
+        logger.info(f"Received audio: {len(audio_bytes)} bytes")
+        
+        # Transcribe with lower probability threshold for better detection
+        transcription = whisper_stt.transcribe_audio(audio_bytes)
+        user_text = transcription.get("text", "").strip()
+        detected_lang = transcription.get("language", "en")
+        confidence = transcription.get("probability", 0.0)
+        
+        logger.info(f"STT Result: text='{user_text}', lang={detected_lang}, confidence={confidence:.2f}")
+        
+        if not user_text:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"No speech detected (confidence: {confidence:.2f}). Please speak louder or closer to microphone."
+            )
+        
+        logger.info(f"Transcribed ({detected_lang}): {user_text}")
+        stt_time = time.time() - start_time
+        
+        # TRUE REAL-TIME: Stream STT → LLM → TTS → Audio
+        async def audio_stream_generator():
+            """Generate TRUE streaming: LLM generates → TTS converts → Audio plays IMMEDIATELY"""
+            
+            # Create WAV header once (with placeholder size for streaming)
+            import struct
+            sample_rate = 22050
+            num_channels = 2
+            bits_per_sample = 16
+            byte_rate = sample_rate * num_channels * bits_per_sample // 8
+            block_align = num_channels * bits_per_sample // 8
+            
+            # WAV header with max size (for streaming)
+            header = struct.pack('<4sI4s', b'RIFF', 0x7FFFFFFF - 8, b'WAVE')
+            header += struct.pack('<4sIHHIIHH', b'fmt ', 16, 1, num_channels, sample_rate, byte_rate, block_align, bits_per_sample)
+            header += struct.pack('<4sI', b'data', 0x7FFFFFFF)
+            yield header
+            
+            logger.info("Streaming: LLM generating → TTS converting → Audio playing in real-time...")
+            sentence_count = 0
+            
+            # Stream: LLM generates sentence → IMMEDIATELY convert to audio → Stream audio
+            async for sentence in generate_response(user_text, None, detected_lang):
+                sentence_count += 1
+                logger.debug(f"Sentence {sentence_count}: {sentence[:60]}... → TTS")
+                
+                # Convert THIS sentence to audio IMMEDIATELY
+                async for audio_chunk in piper_tts.synthesize_stream_async(
+                    sentence, detected_lang, raw_pcm=True
+                ):
+                    yield audio_chunk
+            
+            total_time = time.time() - start_time
+            logger.info(f"Voice interaction complete: STT={stt_time:.2f}s, {sentence_count} sentences, Total={total_time:.2f}s")
+        
+        return StreamingResponse(
+            audio_stream_generator(),
+            media_type="audio/wav",
+            headers={
+                "X-Transcription": user_text[:200],
+                "X-Language": detected_lang,
+                "X-Processing-Time": f"{time.time() - start_time:.2f}s"
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Voice interaction error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/voice/text")
+async def voice_text_input(request: dict):
+    """
+    TEXT INPUT → VOICE OUTPUT (Streaming Audio)
+    For testing without microphone: Type question, get voice response
+    
+    Input: {"text": "your question"}
+    Returns: Streaming audio (WAV format) with <2s latency
+    """
+    try:
+        start_time = time.time()
+        user_text = request.get("text", "").strip()
+        
+        if not user_text:
+            raise HTTPException(status_code=400, detail="No text provided")
+        
+        logger.info(f"Text-to-voice query: {user_text}")
+        
+        # Auto-detect language (for future multi-language support)
+        detected_lang = "en"  # Default to English for now
+        
+        # TRUE REAL-TIME: Stream LLM → TTS → Audio as sentences are generated!
+        async def audio_stream_generator():
+            """Generate TRUE streaming: LLM generates sentence → TTS converts → Audio streams IMMEDIATELY"""
+            llm_start = time.time()
+            
+            # Create WAV header once (with placeholder size for streaming)
+            import struct
+            sample_rate = 22050
+            num_channels = 2
+            bits_per_sample = 16
+            byte_rate = sample_rate * num_channels * bits_per_sample // 8
+            block_align = num_channels * bits_per_sample // 8
+            
+            # WAV header with max size (for streaming)
+            header = struct.pack('<4sI4s', b'RIFF', 0x7FFFFFFF - 8, b'WAVE')
+            header += struct.pack('<4sIHHIIHH', b'fmt ', 16, 1, num_channels, sample_rate, byte_rate, block_align, bits_per_sample)
+            header += struct.pack('<4sI', b'data', 0x7FFFFFFF)
+            yield header
+            
+            logger.info("Streaming: LLM generating → TTS converting → Audio playing in real-time...")
+            sentence_count = 0
+            
+            # Stream: LLM generates sentence → IMMEDIATELY convert to audio → Stream audio
+            # User hears first sentence while LLM is still generating remaining sentences!
+            # Use a consistent session ID for text-to-voice to maintain memory
+            text_session_id = request.get("session_id", "text-to-voice-session")
+            async for sentence in generate_response(user_text, text_session_id, detected_lang):
+                sentence_count += 1
+                logger.debug(f"Sentence {sentence_count}: {sentence[:60]}... → TTS")
+                
+                # Convert THIS sentence to audio IMMEDIATELY (don't wait for more sentences!)
+                async for audio_chunk in piper_tts.synthesize_stream_async(
+                    sentence, detected_lang, raw_pcm=True
+                ):
+                    yield audio_chunk
+            
+            total_time = time.time() - start_time
+            logger.info(f"Text-to-voice complete: {sentence_count} sentences, Total={total_time:.2f}s")
+        
+        return StreamingResponse(
+            audio_stream_generator(),
+            media_type="audio/wav",
+            headers={
+                "X-Language": detected_lang,
+                "X-Stream-Type": "real-time-sentence-streaming",
+                "Cache-Control": "no-cache"
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Text-to-voice error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/text")
 async def process_text(request: TextRequest):

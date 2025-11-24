@@ -1,10 +1,11 @@
 """
-Streaming LLM integration with sentence boundary detection
+Streaming LLM integration with sentence boundary detection and tool calling
 """
 import aiohttp
 import asyncio
 import re
-from typing import AsyncGenerator, Optional, List
+import json
+from typing import AsyncGenerator, Optional, List, Dict, Any
 from core.config import settings
 from core.logger import setup_logger
 
@@ -41,7 +42,7 @@ def clean_text_for_tts(text: str) -> str:
     return text.strip()
 
 class StreamingLLM:
-    """Streaming LLM interface with sentence-level chunking for TTS"""
+    """Streaming LLM interface with sentence-level chunking for TTS and tool calling"""
     
     def __init__(self):
         self.api_url = settings.LLM_API_URL
@@ -50,6 +51,52 @@ class StreamingLLM:
         # Sentence boundary patterns
         self.sentence_endings = re.compile(r'([.!?])\s+')
         logger.info(f"StreamingLLM initialized (model: {self.model})")
+    
+    def format_tools_for_prompt(self, tools: List[Dict]) -> str:
+        """
+        Format tools as part of system prompt
+        Returns formatted string describing available tools
+        """
+        if not tools:
+            return ""
+        
+        tool_descriptions = []
+        for tool in tools:
+            params = []
+            for param_name, param_info in tool.get('parameters', {}).items():
+                param_type = param_info.get('type', 'string')
+                param_desc = param_info.get('description', '')
+                params.append(f"  - {param_name} ({param_type}): {param_desc}")
+            
+            params_str = '\n'.join(params) if params else "  (no parameters)"
+            tool_desc = f"""
+Tool: {tool['name']}
+Description: {tool['description']}
+Parameters:
+{params_str}
+"""
+            tool_descriptions.append(tool_desc)
+        
+        return f"""
+
+=== AVAILABLE TOOLS ===
+You can use the following tools to help users:
+
+{chr(10).join(tool_descriptions)}
+
+=== HOW TO USE TOOLS ===
+When a user asks you to do something that requires a tool, you MUST respond with ONLY this JSON format (no other text):
+
+TOOL_CALL: {{"tool": "tool_name", "parameters": {{"param_name": "value"}}}}
+
+Examples:
+- User: "open youtube.com" → You respond: TOOL_CALL: {{"tool": "open_url", "parameters": {{"url": "https://youtube.com"}}}}
+- User: "check system status" → You respond: TOOL_CALL: {{"tool": "get_system_status", "parameters": {{}}}}
+- User: "read file test.txt" → You respond: TOOL_CALL: {{"tool": "read_file", "parameters": {{"file_path": "test.txt"}}}}
+- User: "create file hello.txt with Hello World" → You respond: TOOL_CALL: {{"tool": "write_file", "parameters": {{"file_path": "hello.txt", "content": "Hello World"}}}}
+
+After the tool executes, you'll receive the result and should respond naturally with the information.
+"""
     
     async def generate_stream(
         self,
@@ -192,6 +239,45 @@ class StreamingLLM:
         async for sentence in self.generate_stream(messages, temperature, max_tokens):
             response += sentence + " "
         return response.strip()
+    
+    def extract_tool_call(self, text: str) -> Optional[Dict[str, Any]]:
+        """
+        Extract tool call from LLM response
+        
+        Returns:
+            Dict with 'tool' and 'parameters' keys, or None if no tool call detected
+        """
+        # Look for TOOL_CALL: prefix followed by JSON
+        tool_call_pattern = r'TOOL_CALL:\s*(\{[^}]*"tool"\s*:\s*"[^"]+[^}]*\})'
+        match = re.search(tool_call_pattern, text, re.IGNORECASE)
+        
+        if match:
+            try:
+                json_str = match.group(1)
+                tool_call = json.loads(json_str)
+                
+                if 'tool' in tool_call and 'parameters' in tool_call:
+                    logger.info(f"Detected tool call: {tool_call['tool']}")
+                    return tool_call
+            except json.JSONDecodeError as e:
+                logger.debug(f"Failed to parse tool call JSON: {e}")
+        
+        # Fallback: look for JSON objects with "tool" key anywhere
+        json_pattern = r'\{[^}]*"tool"\s*:\s*"([^"]+)"[^}]*\}'
+        match = re.search(json_pattern, text)
+        
+        if match:
+            try:
+                json_str = match.group(0)
+                tool_call = json.loads(json_str)
+                
+                if 'tool' in tool_call and 'parameters' in tool_call:
+                    logger.info(f"Detected tool call (fallback): {tool_call['tool']}")
+                    return tool_call
+            except json.JSONDecodeError:
+                logger.debug("Failed to parse fallback tool call JSON")
+        
+        return None
 
 # Global LLM instance
 llm = StreamingLLM()

@@ -1,198 +1,207 @@
 # JARVIS Changelog
 
-All notable changes and updates to the JARVIS voice assistant project.
+All notable changes to the JARVIS Voice Assistant project are documented in this file.
 
-## [2.0.0] - 2025-11-24 - Production Release
+## [3.0.0] - 2025-11-24
 
-### 🎉 Major Features
-- **Real-Time Voice Streaming:** Implemented sentence-by-sentence audio streaming with < 2s latency
-- **Multi-Language Support:** Added English (Piper TTS), Telugu, and Hindi (gTTS) support
-- **Web Search Integration:** Integrated Perplexity AI for current information retrieval
-- **Natural Speech Output:** Implemented paragraph-style formatting for continuous, natural-sounding responses
+### 🎉 Major Features - Tool Integration & Browser Automation
 
-### ✨ Enhancements
-- **Accurate Latency Measurement:** Fixed timing measurement to show real audio arrival time (0.8-2.5s depending on query complexity)
-- **Chunk Optimization:** Improved streaming performance from 4-byte to 4KB chunks (100x improvement)
-- **Text Cleanup:** Added markdown and special character removal for clean TTS output
-- **Query Complexity Detection:** Adaptive token limits based on query type (simple/detailed/search)
-- **Session Management:** Implemented conversation context retention with automatic expiration
+#### Agent Capabilities
+- **Browser Automation (Selenium)**:
+  - YouTube autoplay: Searches and automatically plays first non-sponsored video
+  - Google search: Direct search from voice commands
+  - URL navigation: Open any website with voice command
+  - Persistent browser session for multiple requests
+
+- **System Control**:
+  - Application launcher: VS Code, Terminal, Arduino IDE, PyCharm, Sublime, etc.
+  - Fallback commands: Tries multiple alternatives (xterm, konsole, gnome-terminal)
+  - Background execution: Apps launch with nohup to prevent blocking
+  - Desktop environment detection: Adapts to GNOME, KDE, Unity, XFCE, MATE
+
+- **File Operations**:
+  - Read files with voice command
+  - Create/write files with content
+  - List directory contents
+  - Search files by pattern (glob-based, 50 result limit)
+
+- **System Monitoring**:
+  - CPU usage (per-core and average)
+  - RAM usage (used/total)
+  - Disk space (used/free/total)
+  - Real-time psutil integration
+
+- **Command Execution**:
+  - Safe shell command execution (30s timeout)
+  - Background process support
+  - Output capture (stdout/stderr)
+
+#### Tool System
+- **7 Core Tools** implemented:
+  1. `read_file` - Read file contents
+  2. `write_file` - Create/modify files
+  3. `list_directory` - Browse directories
+  4. `run_command` - Execute shell commands
+  5. `get_system_status` - System information
+  6. `search_files` - Find files by pattern
+  7. `open_url` - Open URLs in browser
+
+- **Tool Manager**:
+  - Centralized tool registration
+  - Async execution support
+  - Error handling and logging
+  - Tool result formatting for LLM
+
+- **Intent Detection**:
+  - Pattern-based command recognition
+  - Regex patterns for YouTube, Google, applications
+  - Fallback to LLM-based tool calling
+  - No latency - instant tool triggering
+
+#### Memory System
+- **200-Turn Conversation History**:
+  - Persistent session management
+  - Context maintained across commands
+  - "What did I ask before?" recall capability
+  - Session timeout: 1800s (30 minutes)
+  - Deque-based efficient storage
+
+#### Interactive Client Improvements
+- **Text-to-Voice Mode** (`--text` flag):
+  - Test without microphone
+  - Full streaming audio output
+  - 120s timeout for long queries
+  - Session persistence
+
+- **Voice Activity Detection (VAD)**:
+  - Optimized threshold: 0.3 (from 0.5)
+  - Better speech detection
+  - Reduced false negatives
 
 ### 🔧 Technical Improvements
-- **Stereo Audio Output:** Convert Piper mono to stereo for better compatibility (22050 Hz, 16-bit PCM)
-- **WAV Streaming Format:** Single WAV header with continuous PCM stream for real-time playback
-- **Async/Sync Architecture:** Dual methods for both streaming and batch processing
-- **Error Handling:** Graceful degradation with proper fallbacks
 
-### 🐛 Bug Fixes
-- Fixed English TTS generating 0 bytes (missing piper binary and espeak-ng)
-- Fixed audio noise issue (added proper WAV headers with correct sizes)
-- Fixed event loop conflict (async Piper called from sync context)
-- Fixed curl command failures (missing Content-Type header)
-- Fixed latency measurement showing constant 0.22s (now accurately measures 0.8-2.5s)
-- Fixed markdown/special characters being spoken in audio output
+#### Streaming Architecture
+- **TRUE Real-Time Streaming**:
+  - Sentence-by-sentence processing
+  - LLM generates → TTS converts → Audio plays immediately
+  - <2s first-sentence latency confirmed
+  - No buffering delays
+
+#### LLM Integration
+- **Mistral Small** via API:
+  - Tool-aware prompts
+  - Dynamic max_tokens (200-1200) based on query complexity
+  - Temperature tuning per use case
+  - Streaming response generation
+
+#### TTS System
+- **Hybrid TTS**:
+  - English: Piper (local, real-time, multiple voices)
+  - Telugu/Hindi: gTTS fallback (cloud-based)
+  - Voice selection: en_US-lessac-medium (default)
+  - Multiple British English voices available
+
+#### Error Handling
+- **Robust Fallbacks**:
+  - Terminal: x-terminal-emulator → xterm → konsole → gnome-terminal
+  - Settings: gnome-control-center → unity-control-center → systemsettings5
+  - Browser: Firefox → Chrome → Chromium
+  - Selenium: Firefox → Chrome fallback
+
+#### Bug Fixes
+- Fixed YouTube regex extracting "and play" in search query
+- Fixed Selenium driver closing prematurely (now persistent)
+- Fixed GNOME terminal snap library conflicts (nohup workaround)
+- Fixed session not persisting (uses "text-to-voice-session" ID)
+- Fixed WAV header struct error in streaming
+- Fixed curl streaming support
+- Fixed PyAudio installation path
 
 ### 📚 Documentation
-- Created comprehensive README with quick start guide
-- Added DEVELOPMENT.md with technical deep dive
-- Consolidated all documentation into 3 main files
-- Removed duplicate and outdated documentation
+- Updated README with v3.0 features
+- Comprehensive usage examples
+- API endpoint documentation
+- Troubleshooting guide
+- Architecture diagrams
 
-### 🧪 Testing
-- Added `test_streaming_realtime.py` for real-time audio testing
-- Created performance benchmark scripts
-- Added curl example scripts
-- Implemented audio quality verification tests
-
-## [1.5.0] - 2025-11-23 - Streaming Implementation
-
-### Added
-- Sentence-by-sentence LLM streaming
-- Real-time TTS conversion per sentence
-- Streaming API endpoint `/api/voice/stream`
-- Python streaming client with PyAudio
-
-### Changed
-- Modified TTS service to support raw PCM output
-- Updated server to stream audio as sentences are generated
-- Improved sentence boundary detection
-
-### Fixed
-- File-based approach replaced with streaming architecture
-- Reduced latency from >10s to <2s
-
-## [1.0.0] - 2025-11-22 - Initial Release
-
-### Added
-- FastAPI server with RESTful API
-- Whisper STT integration (GPU-accelerated)
-- Piper TTS integration (CPU)
-- Mistral LLM integration via llama.cpp
-- Basic session management
-- Health check endpoint
-- API documentation (Swagger UI)
-
-### Core Modules
-- `core/config.py` - Configuration management
-- `core/logger.py` - Logging setup
-- `core/session.py` - Session handling
-- `services/stt.py` - Speech-to-text service
-- `services/tts_hybrid.py` - Multi-language TTS
-- `services/llm.py` - LLM streaming interface
-- `tools/perplexity.py` - Web search integration
-
-## [0.5.0] - 2025-11-21 - Foundation
-
-### Initial Setup
-- Project structure created
-- Docker compose stack for Home Assistant, Whisper, Piper, LLM server
-- NVIDIA Container Toolkit integration
-- GPU acceleration setup
-- Virtual environment configuration
-
-### Hardware Configuration
-- NVIDIA RTX 5060 Ti (16GB VRAM)
-- AMD Ryzen 7 7700
-- Ubuntu 24.04 LTS
-- CUDA 12.x support
-
-## Performance Benchmarks
-
-### Latency Measurements (v2.0.0)
-
-| Query Type | Latency | Components |
-|------------|---------|------------|
-| Simple Math | 0.8-1.0s | LLM generation + TTS |
-| Knowledge Query | 1.0-1.5s | LLM processing + TTS |
-| Web Search | 2.0-2.5s | Search API + LLM + TTS |
-| Complex Explanation | 1.5-2.0s | Extended LLM generation + TTS |
-
-### Audio Quality
-- **Format:** RIFF WAV, 22050 Hz, Stereo, 16-bit PCM
-- **Clarity:** Crystal clear, no artifacts
-- **Naturalness:** Continuous paragraph flow
-- **Streaming:** 4KB chunks, minimal buffering
-
-### Resource Usage
-- **VRAM:** ~14GB (Mistral 24B model)
-- **RAM:** ~4GB (server + services)
-- **CPU:** Low utilization (mainly I/O)
-- **GPU Utilization:** 60-80% during inference
-
-## Known Issues
-
-### Current Limitations
-1. **Search Query Latency:** Web searches take 2-2.5s (acceptable but could be optimized)
-2. **ALSA Warnings:** PyAudio generates warnings on some systems (harmless)
-3. **Single User:** No multi-user authentication (privacy-focused single-user design)
-4. **Language Detection:** Simple Unicode-based detection (works but could be more sophisticated)
-
-### Planned Improvements
-- WebSocket support for bidirectional communication
-- Voice Activity Detection (VAD) for better interruption handling
-- Multiple voice profiles per language
-- Improved language detection
-- Speaker identification for multi-user scenarios
-- Emotion-aware TTS
-
-## Breaking Changes
-
-### v2.0.0
-- API endpoint `/api/voice` renamed to `/api/voice/text`
-- Session management now required for multi-turn conversations
-- Configuration file structure changed (see `core/config.py`)
-
-### v1.5.0
-- Streaming API requires different client implementation
-- WAV format changed to continuous stream (placeholder size)
-
-## Migration Guide
-
-### From v1.x to v2.0
-1. Update configuration file format:
-   ```python
-   # Old
-   TTS_MODEL = "en_GB-alan-medium"
-   
-   # New
-   PIPER_MODEL = "en_GB-alan-medium"
-   ```
-
-2. Update API calls:
-   ```bash
-   # Old
-   curl -X POST /api/voice -d '{"text": "Hello"}'
-   
-   # New
-   curl -X POST /api/voice/text -H "Content-Type: application/json" -d '{"text": "Hello"}'
-   ```
-
-3. For streaming, use new endpoint:
-   ```bash
-   curl -X POST /api/voice/stream -H "Content-Type: application/json" --no-buffer
-   ```
-
-## Contributors
-
-- **Nani** - Lead Developer & Architect
-
-## Acknowledgments
-
-### Technology Stack
-- **Piper TTS** by Rhasspy - High-quality neural text-to-speech
-- **Whisper** by OpenAI - Robust speech recognition
-- **Mistral AI** - Powerful open-source language model
-- **FastAPI** - Modern Python web framework
-- **llama.cpp** - Efficient LLM inference
-
-### Community
-Thanks to the open-source community for the amazing tools that made this project possible.
-
-## License
-
-MIT License - See LICENSE file for details
+### 🗑️ Cleanup
+- Removed duplicate .md files
+- Consolidated documentation to README.md and CHANGELOG.md
+- Archived old implementation docs
+- Cleaned up test scripts
 
 ---
 
-**Last Updated:** November 24, 2025  
-**Current Version:** 2.0.0  
-**Status:** Production Ready ✅
+## [2.0.0] - 2025-11-XX
+
+### Features
+- **Real-Time Streaming**:
+  - TRUE sentence-by-sentence streaming
+  - <2s latency for first response
+  - WAV streaming support
+  - Server-Sent Events (SSE)
+
+- **Multi-Language Support**:
+  - English: Piper TTS (local)
+  - Telugu: gTTS (cloud fallback)
+  - Hindi: gTTS (cloud fallback)
+  - Auto language detection
+
+- **Web Search Integration**:
+  - Perplexity AI API
+  - Automatic search intent detection
+  - Citation support
+  - Configurable timeout (120s)
+
+- **Session Management**:
+  - UUID-based sessions
+  - Conversation history
+  - Context preservation
+  - Automatic cleanup
+
+### Technical
+- FastAPI server with WebSocket support
+- Whisper STT (GPU-accelerated)
+- Mistral LLM (GPU-accelerated)
+- Piper TTS (CPU, local processing)
+- CUDA optimization
+
+---
+
+## [1.0.0] - Initial Release
+
+### Features
+- Basic voice assistant functionality
+- Whisper speech-to-text
+- OpenAI GPT integration
+- Basic TTS
+- Simple FastAPI server
+
+---
+
+## Version History Summary
+
+- **v3.0.0** (Current): Tool integration, browser automation, 200-turn memory
+- **v2.0.0**: Real-time streaming, multi-language, web search
+- **v1.0.0**: Initial voice assistant release
+
+---
+
+## Upcoming Features
+
+### Phase 3: Multi-Language Streaming TTS
+- [ ] Telugu Piper TTS model research
+- [ ] Hindi Piper TTS model research
+- [ ] Real-time streaming for Telugu/Hindi
+- [ ] Voice selection per language
+
+### Phase 4: Endpoint Refactoring
+- [ ] Move `/api/text` to `/api/debug/text`
+- [ ] Streamline endpoint structure
+- [ ] Voice-first design emphasis
+
+### Phase 5: Polish & Release
+- [ ] Comprehensive testing suite
+- [ ] Performance benchmarks
+- [ ] Production deployment guide
+- [ ] GitHub release with binaries
