@@ -1233,11 +1233,15 @@ async def voice_ask(audio: UploadFile = File(...)):
         logger.error(f"Voice ask error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/voice/text")
-async def voice_text(request: TextRequest):
-    """Text input -> Audio output (TTS response) - Complete audio in JSON"""
+@app.post("/api/voice/text/json")
+async def voice_text_json(request: TextRequest):
+    """Text input -> Audio output (TTS response) - Complete audio in JSON (non-streaming)
+    
+    NOTE: Use /api/voice/text for streaming audio response (recommended for low latency).
+    This endpoint waits for complete response before returning.
+    """
     try:
-        logger.info(f"Text to voice: {request.text[:100]}")
+        logger.info(f"Text to voice (JSON): {request.text[:100]}")
         
         # Detect language
         detected_lang = detect_language(request.text)
@@ -1265,7 +1269,7 @@ async def voice_text(request: TextRequest):
             "audio_size": len(audio_data)
         }
     except Exception as e:
-        logger.error(f"Voice text error: {e}")
+        logger.error(f"Voice text JSON error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/voice/stream")

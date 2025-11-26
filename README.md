@@ -44,6 +44,15 @@ pip install -r requirements.txt
 
 ### Running JARVIS
 
+#### Complete Startup (Recommended)
+```bash
+# Start both LLM server and JARVIS server
+./start_all.sh
+
+# Stop all services
+./stop_all.sh
+```
+
 #### Interactive Voice Mode (with microphone)
 ```bash
 ./jarvis.py
@@ -54,8 +63,14 @@ pip install -r requirements.txt
 ./jarvis.py --text
 ```
 
-#### Server Only
+#### Server Only (requires LLM server running separately)
 ```bash
+# First start LLM server:
+/home/nani/llama.cpp/build/bin/llama-server \
+  -m /home/nani/llama.cpp/models/mistral-small-24b-instruct-q4_k_m.gguf \
+  -c 8192 --host 0.0.0.0 --port 8080
+
+# Then start JARVIS:
 python3 server.py
 ```
 

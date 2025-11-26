@@ -50,12 +50,30 @@ Look for these timing markers:
 
 #### Audio Device Auto-Suspend Re-enabled
 ```bash
-# Verify PipeWire config exists
+# Check if audio keep-alive service is running (preferred solution)
+systemctl --user status jarvis-audio-keepalive.service
+
+# If not running, enable it:
+systemctl --user enable --now jarvis-audio-keepalive.service
+
+# Alternative: Verify PipeWire config exists
 ls ~/.config/pipewire/pipewire-pulse.conf.d/10-no-suspend.conf
 
 # If missing, recreate it:
 mkdir -p ~/.config/pipewire/pipewire-pulse.conf.d
-printf '# Disable audio device auto-suspend\ncontext.exec = [\n    { path = "pactl" args = "load-module module-suspend-on-idle timeout=0" }\n]\n' > ~/.config/pipewire/pipewire-pulse.conf.d/10-no-suspend.conf
+cat > ~/.config/pipewire/pipewire-pulse.conf.d/10-no-suspend.conf << 'EOF'
+# Prevent audio device auto-suspend for low-latency voice assistant
+pulse.rules = [
+    {
+        matches = [ { node.name = "~alsa_output.*" } ]
+        actions = {
+            update-props = {
+                session.suspend-timeout-seconds = 0
+            }
+        }
+    }
+]
+EOF
 
 # Restart PipeWire
 systemctl --user restart pipewire pipewire-pulse
