@@ -2,6 +2,39 @@
 
 All notable changes to the JARVIS Voice Assistant project are documented in this file.
 
+## [3.0.0-v3] - 2025-11-27
+
+### 🎯 Production-Ready Release
+
+#### Complete Startup System
+- **`start_all.sh`**: Single command to start LLM server + JARVIS
+  - Automatically waits for LLM model to load
+  - Health checks before declaring ready
+  - Comprehensive logging and error handling
+- **`stop_all.sh`**: Graceful shutdown of all services
+  - Proper process cleanup
+  - Port verification
+
+#### Permanent Audio Fix
+- **Systemd audio keep-alive service** (`jarvis-audio-keepalive.service`)
+  - Runs as user service, starts on boot
+  - Plays inaudible silence every 30s to prevent device suspension
+  - Combined with PipeWire config for double protection
+  - Eliminates latency degradation over extended use
+
+#### Critical Bug Fixes
+- **Fixed duplicate `/api/voice/text` endpoint**
+  - Renamed non-streaming version to `/api/voice/text/json`
+  - Streaming endpoint now works correctly
+- **Fixed FastAPI version** (was 2.0.0, now 3.0.0)
+
+#### Code Cleanup
+- Removed 9 obsolete test files
+- Cleaned `__pycache__` directories
+- Version consistency across all components
+
+---
+
 ## [3.0.0-v2] - 2025-11-25
 
 ### ⚡ Performance & Stability Updates (Version 2)

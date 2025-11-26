@@ -132,27 +132,44 @@ sudo apt-get install xterm gnome-control-center
 - First use may be slow (browser startup)
 - Browser stays open for subsequent requests
 
+### Audio Latency Increasing Over Time
+```bash
+# Check if audio keep-alive service is running
+systemctl --user status jarvis-audio-keepalive.service
+
+# If not running, enable it
+systemctl --user enable --now jarvis-audio-keepalive.service
+```
+
 ### No Microphone
 Use text-to-voice mode: `./jarvis.py --text`
 
 ## 📚 API Endpoints
 
-- `POST /api/voice` - Audio in → Audio out
-- `POST /api/voice/text` - Text in → Streaming audio out
-- `POST /api/text` - Text in → Text out
+| Endpoint | Input | Output | Use Case |
+|----------|-------|--------|----------|
+| `POST /api/voice` | Audio file | Streaming WAV | Full voice interaction |
+| `POST /api/voice/text` | JSON `{text}` | Streaming WAV | Text-to-voice (recommended) |
+| `POST /api/voice/text/json` | JSON `{text}` | JSON with base64 audio | Non-streaming alternative |
+| `POST /api/text` | JSON `{text}` | JSON `{response}` | Text-only |
 
 ## 🗺️ Roadmap
 
-- [x] Phase 1: Real-time streaming (v2.0)
-- [x] Phase 2: Tool integration & browser automation (v3.0)
+- [x] Phase 1: Real-time streaming (<2s latency)
+- [x] Phase 2: Tool integration & browser automation  
+- [x] Phase 2.5: Production startup system & permanent fixes
 - [ ] Phase 3: Telugu/Hindi streaming TTS
 - [ ] Phase 4: Endpoint refactoring
 - [ ] Phase 5: Complete documentation
 
-## 📄 License
+## 📄 Documentation
 
-MIT License
+- `README.md` - Quick start and usage
+- `DEVELOPMENT.md` - Technical implementation details
+- `TROUBLESHOOTING.md` - Problem diagnosis and fixes
+- `CHANGELOG.md` - Version history
 
 ## 🙏 Acknowledgments
 
 - Whisper (OpenAI), Mistral AI, Piper TTS, Perplexity AI, Selenium
+
