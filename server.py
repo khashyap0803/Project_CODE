@@ -571,12 +571,12 @@ def detect_tool_intent(query: str) -> Optional[tuple[str, dict]]:
     
     # === YouTube Media Controls ===
     if BROWSER_AUTOMATION_AVAILABLE:
-        # Pause video
-        if any(phrase in query_lower for phrase in ['pause the video', 'pause video', 'pause the song', 'pause song', 'pause youtube', 'pause it', 'pause playback', 'stop the video', 'stop video', 'stop playing', 'pause the music', 'pause music']):
+        # Pause video - check if just "pause" with no other context
+        if query_lower.strip() == 'pause' or any(phrase in query_lower for phrase in ['pause the video', 'pause video', 'pause the song', 'pause song', 'pause youtube', 'pause it', 'pause playback', 'stop the video', 'stop video', 'stop playing', 'pause the music', 'pause music']):
             return ('youtube_control', {'action': 'pause'})
         
-        # Play/Resume video
-        if any(phrase in query_lower for phrase in ['play the video', 'play video', 'resume the video', 'resume video', 'resume playback', 'continue playing', 'play it', 'resume playing', 'unpause', 'unpause video', 'start playing again']):
+        # Play/Resume video - check if just "play" or "resume" with no other context
+        if query_lower.strip() in ['play', 'resume'] or any(phrase in query_lower for phrase in ['play the video', 'play video', 'resume the video', 'resume video', 'resume playback', 'continue playing', 'play it', 'resume playing', 'unpause', 'unpause video', 'start playing again']):
             if 'youtube' not in query_lower or 'in youtube' not in query_lower:
                 return ('youtube_control', {'action': 'play'})
         
@@ -617,16 +617,32 @@ def detect_tool_intent(query: str) -> Optional[tuple[str, dict]]:
             return ('youtube_control', {'action': 'skip_ad'})
         
         # Browser controls
-        if any(phrase in query_lower for phrase in ['close browser', 'close the browser', 'exit browser']):
+        if any(phrase in query_lower for phrase in ['open browser', 'open the browser', 'launch browser', 'start browser']):
+            return ('browser_control', {'action': 'open_browser'})
+        if any(phrase in query_lower for phrase in ['close browser', 'close the browser', 'exit browser', 'quit browser']):
             return ('browser_control', {'action': 'close_browser'})
-        if any(phrase in query_lower for phrase in ['new tab', 'open new tab', 'open a new tab']):
+        if any(phrase in query_lower for phrase in ['new tab', 'open new tab', 'open a new tab', 'open tab']):
             return ('browser_control', {'action': 'new_tab'})
         if any(phrase in query_lower for phrase in ['close tab', 'close this tab', 'close the tab']):
             return ('browser_control', {'action': 'close_tab'})
-        if any(phrase in query_lower for phrase in ['refresh page', 'refresh the page', 'reload page']):
+        if any(phrase in query_lower for phrase in ['refresh page', 'refresh the page', 'reload page', 'refresh']):
             return ('browser_control', {'action': 'refresh'})
         if any(phrase in query_lower for phrase in ['go back', 'back page', 'previous page']) and 'video' not in query_lower:
             return ('browser_control', {'action': 'back'})
+        if any(phrase in query_lower for phrase in ['go forward', 'forward page', 'next page']) and 'video' not in query_lower:
+            return ('browser_control', {'action': 'forward'})
+        if any(phrase in query_lower for phrase in ['maximize browser', 'maximize the browser', 'browser fullscreen']):
+            return ('browser_control', {'action': 'maximize'})
+        if any(phrase in query_lower for phrase in ['minimize browser', 'minimize the browser']):
+            return ('browser_control', {'action': 'minimize'})
+        
+        # Navigate to URL
+        url_match = re.search(r'(?:navigate to|go to|open)\s+(?:url\s+)?(?:https?://)?(\S+\.\S+)', query_lower)
+        if url_match and ('navigate' in query_lower or 'url' in query_lower):
+            url = url_match.group(1)
+            if not url.startswith('http'):
+                url = 'https://' + url
+            return ('browser_control', {'action': 'goto', 'url': url})
     
     # === System Controls ===
     if SYSTEM_CONTROL_AVAILABLE:
@@ -697,6 +713,37 @@ def detect_tool_intent(query: str) -> Optional[tuple[str, dict]]:
                 return ('system_control', {'action': 'bluetooth_on'})
             if any(word in query_lower for word in ['off', 'disable', 'turn off']):
                 return ('system_control', {'action': 'bluetooth_off'})
+        
+        # Hibernate
+        if any(phrase in query_lower for phrase in ['hibernate', 'hibernation']):
+            return ('system_control', {'action': 'hibernate'})
+        
+        # Window management - minimize
+        if any(phrase in query_lower for phrase in ['minimize window', 'minimize the window', 'minimize app', 'minimize application']):
+            # Extract app name if present
+            match = re.search(r'minimize\s+(?:the\s+)?(?:window\s+)?(?:of\s+)?(.+?)(?:\s+window|\s+app)?$', query_lower)
+            app_name = match.group(1).strip() if match and match.group(1).strip() not in ['window', 'app', 'application', 'the'] else None
+            return ('system_control', {'action': 'minimize_window', 'app_name': app_name})
+        
+        # Window management - maximize
+        if any(phrase in query_lower for phrase in ['maximize window', 'maximize the window', 'maximize app', 'maximize application']):
+            match = re.search(r'maximize\s+(?:the\s+)?(?:window\s+)?(?:of\s+)?(.+?)(?:\s+window|\s+app)?$', query_lower)
+            app_name = match.group(1).strip() if match and match.group(1).strip() not in ['window', 'app', 'application', 'the'] else None
+            return ('system_control', {'action': 'maximize_window', 'app_name': app_name})
+        
+        # Window management - close window (not browser)
+        if any(phrase in query_lower for phrase in ['close window', 'close the window', 'close app', 'close application']) and 'browser' not in query_lower:
+            match = re.search(r'close\s+(?:the\s+)?(?:window\s+)?(?:of\s+)?(.+?)(?:\s+window|\s+app)?$', query_lower)
+            app_name = match.group(1).strip() if match and match.group(1).strip() not in ['window', 'app', 'application', 'the'] else None
+            return ('system_control', {'action': 'close_window', 'app_name': app_name})
+        
+        # Focus window / switch to app
+        if any(phrase in query_lower for phrase in ['switch to', 'focus on', 'bring up', 'show me']):
+            match = re.search(r'(?:switch to|focus on|bring up|show me)\s+(?:the\s+)?(.+?)(?:\s+window|\s+app)?$', query_lower)
+            if match:
+                app_name = match.group(1).strip()
+                if app_name and app_name not in ['window', 'app', 'application']:
+                    return ('system_control', {'action': 'focus_window', 'app_name': app_name})
     
     return None
 
@@ -798,22 +845,36 @@ Provide a natural summary of what the user did or asked previously."""
                 logger.info(f"Tool result: {tool_result}")
             
             # Generate natural response with tool result
-            tool_context = {
-                "role": "user",
-                "content": f"""The user asked: "{user_query}"
+            # For successful actions, use very short responses
+            is_success = tool_result.get('success', False)
+            result_message = tool_result.get('message', '')
+            
+            if is_success and tool_name in ['youtube_control', 'browser_control', 'system_control', 'youtube_autoplay']:
+                # For control actions, give extremely brief responses
+                tool_context = {
+                    "role": "user",
+                    "content": f"""User: "{user_query}"
+Tool result: {result_message}
 
-I executed the {tool_name} tool and got this result:
-{json.dumps(tool_result, indent=2)}
+Reply with ONLY 1-3 words confirming the action. Examples: "Done", "Paused", "Playing", "Volume up", "Opened", "Closed". Do NOT explain further."""
+                }
+            else:
+                # For other tools or failures, be more descriptive
+                tool_context = {
+                    "role": "user",
+                    "content": f"""User: "{user_query}"
+Tool: {tool_name}
+Result: {json.dumps(tool_result, indent=2)}
 
-Provide a natural, conversational response explaining what was done and the result. Be concise but helpful."""
-            }
+{"Briefly explain what went wrong." if not is_success else "Briefly confirm what was done."}"""
+                }
             
             messages = [
-                {"role": "system", "content": "You are JARVIS. Explain tool results naturally and conversationally."},
+                {"role": "system", "content": "You are JARVIS. Be extremely brief for successful control actions (1-3 words). Only elaborate if there was an error."},
                 tool_context
             ]
             
-            async for sentence in llm.generate_stream(messages, temperature=0.7, max_tokens=300):
+            async for sentence in llm.generate_stream(messages, temperature=0.3, max_tokens=100):
                 yield sentence
             
             return
@@ -861,7 +922,13 @@ IMPORTANT: Format ALL responses as continuous flowing paragraphs. Never use:
 
 Instead, write everything as connected sentences in paragraph form for smooth, natural speech flow. Explain concepts by weaving information together naturally, as if speaking to someone in conversation.
 
-Be concise for simple queries, detailed for complex ones. Always maintain context from previous conversation."""
+RESPONSE LENGTH RULES:
+- For system/browser/YouTube control actions that SUCCEEDED: Reply with just 1-3 words like "Done", "Opened", "Paused", "Volume up", etc. Do NOT give long explanations.
+- For actions that FAILED: Briefly explain what went wrong in one sentence.
+- For questions and conversations: Be conversational but concise.
+- For complex queries: Be detailed as needed.
+
+Always maintain context from previous conversation."""
         if search_failure_note:
             base_system_content += f"\n\n{search_failure_note}"
         

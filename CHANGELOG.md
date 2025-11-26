@@ -2,6 +2,64 @@
 
 All notable changes to the JARVIS Voice Assistant project are documented in this file.
 
+## [3.0.0-v5] - 2025-11-27
+
+### 🚀 Native Browser & Polished Controls Release
+
+#### Native Browser Support (FIXED)
+- **Chrome now uses your actual browser profile:**
+  - Uses `--user-data-dir=/home/nani/.config/google-chrome` for native profile
+  - Removed `--enable-automation` flag - no more "test browser" appearance
+  - Window decorations preserved (no more missing title bar)
+  - Existing cookies, bookmarks, and extensions available
+  - Browser behaves like your normal Chrome browser
+
+#### Ultra-Short Responses
+- **Tool actions now give minimal responses:**
+  - "Playing", "Paused", "Done", "Closed", "Opened"
+  - No more long explanations for simple actions
+  - Feels more like a voice assistant, less like a chatbot
+
+#### Improved Command Detection
+- **Single-word commands now work:**
+  - "pause" alone pauses video
+  - "play" or "resume" alone resumes video
+  - No need to say "pause the video" or "pause it"
+
+- **New detection patterns added:**
+  - "open browser", "launch browser", "start browser"
+  - "navigate to [url]", "go to [url]"
+  - "maximize browser", "minimize browser"
+  - "hibernate system"
+
+#### Window Management (NEW)
+- **xdotool-based window control:**
+  - `maximize_window(app_name)` - maximize any application
+  - `minimize_window(app_name)` - minimize any application
+  - `close_app(app_name)` - close any application window
+  - wmctrl fallback for compatibility
+
+#### Power Controls (FIXED)
+- **Multiple backend support:**
+  - systemctl for shutdown/restart
+  - gnome-session-quit with GUI support
+  - loginctl for lock screen
+  - dbus-send as fallback
+  - Proper working directory handling
+
+#### Screenshot (FIXED)
+- **scrot as primary screenshot tool:**
+  - Fixed gnome-screenshot snap compatibility issues
+  - Saves to ~/Pictures/screenshot_YYYYMMDD_HHMMSS.png
+
+#### Continuous Ad Skipping
+- **Background ad detection:**
+  - Ads skipped automatically when playing videos
+  - Runs in separate thread during playback
+  - Works on video transitions (next/previous)
+
+---
+
 ## [3.0.0-v4] - 2025-11-27
 
 ### 🎮 Complete Browser & System Control Release

@@ -213,90 +213,160 @@ class SystemControl:
     # ==================== SCREENSHOT ====================
     
     def take_screenshot(self, filename: str = None, area: str = "full") -> Dict[str, Any]:
-        """
-        Take a screenshot
-        area: 'full' for full screen, 'window' for active window, 'select' for selection
-        """
+        """Take a screenshot - tries multiple methods"""
         if filename is None:
             import datetime
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"~/Pictures/screenshot_{timestamp}.png"
-        
-        filename = os.path.expanduser(filename)
-        
-        # Try gnome-screenshot first
-        if area == "full":
-            result = self._run_command(f"gnome-screenshot -f {filename}")
-        elif area == "window":
-            result = self._run_command(f"gnome-screenshot -w -f {filename}")
-        elif area == "select":
-            result = self._run_command(f"gnome-screenshot -a -f {filename}")
+            # Ensure Pictures directory exists
+            pictures_dir = os.path.expanduser("~/Pictures")
+            os.makedirs(pictures_dir, exist_ok=True)
+            filename = f"{pictures_dir}/screenshot_{timestamp}.png"
         else:
-            result = self._run_command(f"gnome-screenshot -f {filename}")
+            filename = os.path.expanduser(filename)
         
-        if result["success"]:
-            return {"success": True, "message": f"Screenshot saved to {filename}", "path": filename}
-        
-        # Fallback to scrot
+        # Method 1: gnome-screenshot (most common on Ubuntu/GNOME)
         if area == "full":
-            result = self._run_command(f"scrot {filename}")
+            result = self._run_command(f"gnome-screenshot -f '{filename}'")
         elif area == "window":
-            result = self._run_command(f"scrot -u {filename}")
+            result = self._run_command(f"gnome-screenshot -w -f '{filename}'")
         elif area == "select":
-            result = self._run_command(f"scrot -s {filename}")
+            result = self._run_command(f"gnome-screenshot -a -f '{filename}'")
+        else:
+            result = self._run_command(f"gnome-screenshot -f '{filename}'")
         
-        if result["success"]:
-            return {"success": True, "message": f"Screenshot saved to {filename}", "path": filename}
+        if result["success"] and os.path.exists(filename):
+            return {"success": True, "message": f"Screenshot saved"}
         
-        return {"success": False, "error": "Failed to take screenshot. Install gnome-screenshot or scrot."}
+        # Method 2: scrot
+        if area == "full":
+            result = self._run_command(f"scrot '{filename}'")
+        elif area == "window":
+            result = self._run_command(f"scrot -u '{filename}'")
+        elif area == "select":
+            result = self._run_command(f"scrot -s '{filename}'")
+        else:
+            result = self._run_command(f"scrot '{filename}'")
+        
+        if result["success"] and os.path.exists(filename):
+            return {"success": True, "message": f"Screenshot saved"}
+        
+        # Method 3: import (ImageMagick)
+        result = self._run_command(f"import -window root '{filename}'")
+        if result["success"] and os.path.exists(filename):
+            return {"success": True, "message": f"Screenshot saved"}
+        
+        # Method 4: grim (for Wayland)
+        result = self._run_command(f"grim '{filename}'")
+        if result["success"] and os.path.exists(filename):
+            return {"success": True, "message": f"Screenshot saved"}
+        
+        return {"success": False, "error": "Screenshot failed. Install gnome-screenshot or scrot."}
     
     # ==================== POWER MANAGEMENT ====================
     
     def lock_screen(self) -> Dict[str, Any]:
-        """Lock the screen"""
-        # Try multiple lock commands
-        commands = [
-            "gnome-screensaver-command -l",
-            "xdg-screensaver lock",
-            "loginctl lock-session",
-            "dm-tool lock"
-        ]
+        """Lock the screen - tries multiple methods"""
+        # Method 1: GNOME screensaver
+        result = self._run_command("gnome-screensaver-command -l")
+        if result["success"]:
+            return {"success": True, "message": "Locked"}
         
-        for cmd in commands:
-            result = self._run_command(cmd)
-            if result["success"]:
-                return {"success": True, "message": "Screen locked"}
+        # Method 2: loginctl (systemd)
+        result = self._run_command("loginctl lock-session")
+        if result["success"]:
+            return {"success": True, "message": "Locked"}
         
-        return {"success": False, "error": "Failed to lock screen"}
+        # Method 3: xdg-screensaver
+        result = self._run_command("xdg-screensaver lock")
+        if result["success"]:
+            return {"success": True, "message": "Locked"}
+        
+        # Method 4: dbus
+        result = self._run_command("dbus-send --type=method_call --dest=org.gnome.ScreenSaver /org/gnome/ScreenSaver org.gnome.ScreenSaver.Lock")
+        if result["success"]:
+            return {"success": True, "message": "Locked"}
+        
+        # Method 5: dm-tool
+        result = self._run_command("dm-tool lock")
+        if result["success"]:
+            return {"success": True, "message": "Locked"}
+        
+        return {"success": False, "error": "Could not lock screen"}
     
     def suspend(self) -> Dict[str, Any]:
-        """Suspend the system (sleep)"""
+        """Suspend/sleep the system"""
+        # Method 1: systemctl (most reliable)
         result = self._run_command("systemctl suspend")
         if result["success"]:
-            return {"success": True, "message": "System suspended"}
-        return {"success": False, "error": "Failed to suspend. May need sudo."}
+            return {"success": True, "message": "Suspending"}
+        
+        # Method 2: pm-suspend
+        result = self._run_command("pm-suspend")
+        if result["success"]:
+            return {"success": True, "message": "Suspending"}
+        
+        # Method 3: dbus
+        result = self._run_command("dbus-send --system --print-reply --dest=org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager.Suspend boolean:true")
+        if result["success"]:
+            return {"success": True, "message": "Suspending"}
+        
+        return {"success": False, "error": "Could not suspend. May need sudo."}
+    
+    def hibernate(self) -> Dict[str, Any]:
+        """Hibernate the system"""
+        result = self._run_command("systemctl hibernate")
+        if result["success"]:
+            return {"success": True, "message": "Hibernating"}
+        
+        result = self._run_command("pm-hibernate")
+        if result["success"]:
+            return {"success": True, "message": "Hibernating"}
+        
+        return {"success": False, "error": "Could not hibernate. May not be supported."}
     
     def shutdown(self, delay: int = 0) -> Dict[str, Any]:
         """Shutdown the system"""
-        if delay > 0:
-            result = self._run_command(f"shutdown +{delay}")
-        else:
+        # Use gnome-session-quit for GNOME (shows dialog)
+        if delay == 0:
+            result = self._run_command("gnome-session-quit --power-off")
+            if result["success"]:
+                return {"success": True, "message": "Shutting down"}
+            
+            # Direct shutdown
+            result = self._run_command("systemctl poweroff")
+            if result["success"]:
+                return {"success": True, "message": "Shutting down"}
+            
             result = self._run_command("shutdown now")
+            if result["success"]:
+                return {"success": True, "message": "Shutting down"}
+        else:
+            result = self._run_command(f"shutdown +{delay}")
+            if result["success"]:
+                return {"success": True, "message": f"Shutdown in {delay} min"}
         
-        if result["success"]:
-            return {"success": True, "message": f"System will shutdown" + (f" in {delay} minutes" if delay else " now")}
-        return {"success": False, "error": "Failed to shutdown. May need sudo."}
+        return {"success": False, "error": "Could not shutdown. May need sudo."}
     
     def restart(self, delay: int = 0) -> Dict[str, Any]:
-        """Restart the system"""
-        if delay > 0:
-            result = self._run_command(f"shutdown -r +{delay}")
-        else:
+        """Restart/reboot the system"""
+        if delay == 0:
+            result = self._run_command("gnome-session-quit --reboot")
+            if result["success"]:
+                return {"success": True, "message": "Restarting"}
+            
+            result = self._run_command("systemctl reboot")
+            if result["success"]:
+                return {"success": True, "message": "Restarting"}
+            
             result = self._run_command("shutdown -r now")
+            if result["success"]:
+                return {"success": True, "message": "Restarting"}
+        else:
+            result = self._run_command(f"shutdown -r +{delay}")
+            if result["success"]:
+                return {"success": True, "message": f"Restart in {delay} min"}
         
-        if result["success"]:
-            return {"success": True, "message": f"System will restart" + (f" in {delay} minutes" if delay else " now")}
-        return {"success": False, "error": "Failed to restart. May need sudo."}
+        return {"success": False, "error": "Could not restart. May need sudo."}
     
     def cancel_shutdown(self) -> Dict[str, Any]:
         """Cancel scheduled shutdown"""
@@ -342,6 +412,143 @@ class SystemControl:
         if result["success"]:
             return {"success": True, "message": "Bluetooth disabled"}
         return {"success": False, "error": "Failed to disable Bluetooth"}
+    
+    # ==================== WINDOW MANAGEMENT ====================
+    
+    def minimize_window(self, app_name: str = None) -> Dict[str, Any]:
+        """Minimize active window or specific app window"""
+        if app_name:
+            # Try to find window by app name and minimize
+            result = self._run_command(f"wmctrl -c '{app_name}'")  # This closes, not minimize
+            # Use xdotool to minimize by name
+            result = self._run_command(f"xdotool search --name '{app_name}' windowminimize")
+            if result["success"]:
+                return {"success": True, "message": "Minimized"}
+        
+        # Minimize active window
+        result = self._run_command("xdotool getactivewindow windowminimize")
+        if result["success"]:
+            return {"success": True, "message": "Minimized"}
+        
+        # Fallback: use keyboard shortcut
+        result = self._run_command("xdotool key super+h")
+        if result["success"]:
+            return {"success": True, "message": "Minimized"}
+        
+        return {"success": False, "error": "Could not minimize. Install xdotool."}
+    
+    def maximize_window(self, app_name: str = None) -> Dict[str, Any]:
+        """Maximize active window or specific app window"""
+        if app_name:
+            result = self._run_command(f"wmctrl -r '{app_name}' -b add,maximized_vert,maximized_horz")
+            if result["success"]:
+                return {"success": True, "message": "Maximized"}
+            
+            # Try xdotool
+            result = self._run_command(f"xdotool search --name '{app_name}' windowactivate windowsize 100% 100%")
+            if result["success"]:
+                return {"success": True, "message": "Maximized"}
+        
+        # Maximize active window
+        result = self._run_command("wmctrl -r :ACTIVE: -b add,maximized_vert,maximized_horz")
+        if result["success"]:
+            return {"success": True, "message": "Maximized"}
+        
+        # Fallback: keyboard shortcut
+        result = self._run_command("xdotool key super+Up")
+        if result["success"]:
+            return {"success": True, "message": "Maximized"}
+        
+        return {"success": False, "error": "Could not maximize. Install wmctrl."}
+    
+    def close_window(self, app_name: str = None) -> Dict[str, Any]:
+        """Close active window or specific app window"""
+        if app_name:
+            result = self._run_command(f"wmctrl -c '{app_name}'")
+            if result["success"]:
+                return {"success": True, "message": "Closed"}
+            
+            # Try pkill for the app
+            result = self._run_command(f"pkill -f '{app_name}'")
+            if result["success"]:
+                return {"success": True, "message": "Closed"}
+        
+        # Close active window
+        result = self._run_command("xdotool getactivewindow windowclose")
+        if result["success"]:
+            return {"success": True, "message": "Closed"}
+        
+        # Fallback: Alt+F4
+        result = self._run_command("xdotool key alt+F4")
+        if result["success"]:
+            return {"success": True, "message": "Closed"}
+        
+        return {"success": False, "error": "Could not close window"}
+    
+    def focus_window(self, app_name: str) -> Dict[str, Any]:
+        """Bring a window to focus"""
+        result = self._run_command(f"wmctrl -a '{app_name}'")
+        if result["success"]:
+            return {"success": True, "message": f"Focused {app_name}"}
+        
+        result = self._run_command(f"xdotool search --name '{app_name}' windowactivate")
+        if result["success"]:
+            return {"success": True, "message": f"Focused {app_name}"}
+        
+        return {"success": False, "error": f"Could not find {app_name}"}
+    
+    def list_windows(self) -> Dict[str, Any]:
+        """List all open windows"""
+        result = self._run_command("wmctrl -l")
+        if result["success"]:
+            return {"success": True, "windows": result["stdout"], "message": "Windows listed"}
+        return {"success": False, "error": "Could not list windows. Install wmctrl."}
+    
+    # ==================== APP MANAGEMENT ====================
+    
+    def open_app(self, app_name: str) -> Dict[str, Any]:
+        """Open an application"""
+        # Common app mappings
+        app_commands = {
+            "terminal": "gnome-terminal",
+            "browser": "xdg-open http://",
+            "firefox": "firefox",
+            "chrome": "google-chrome",
+            "files": "nautilus",
+            "file manager": "nautilus",
+            "settings": "gnome-control-center",
+            "calculator": "gnome-calculator",
+            "text editor": "gedit",
+            "vscode": "code",
+            "vs code": "code",
+        }
+        
+        cmd = app_commands.get(app_name.lower(), app_name)
+        
+        # Run in background
+        try:
+            subprocess.Popen(
+                cmd,
+                shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+            return {"success": True, "message": "Opened"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    def close_app(self, app_name: str) -> Dict[str, Any]:
+        """Close an application by name"""
+        result = self._run_command(f"pkill -f '{app_name}'")
+        if result["success"]:
+            return {"success": True, "message": "Closed"}
+        
+        result = self._run_command(f"wmctrl -c '{app_name}'")
+        if result["success"]:
+            return {"success": True, "message": "Closed"}
+        
+        return {"success": False, "error": f"Could not close {app_name}"}
     
     # ==================== CLIPBOARD ====================
     
@@ -444,6 +651,8 @@ class SystemControl:
             return self.lock_screen()
         elif action in ['sleep', 'suspend']:
             return self.suspend()
+        elif action == 'hibernate':
+            return self.hibernate()
         elif action == 'shutdown':
             return self.shutdown(kwargs.get('delay', 0))
         elif action in ['restart', 'reboot']:
@@ -462,6 +671,24 @@ class SystemControl:
             return self.bluetooth_on()
         elif action == 'bluetooth_off':
             return self.bluetooth_off()
+        
+        # Window management
+        elif action == 'minimize_window':
+            return self.minimize_window(kwargs.get('app_name'))
+        elif action == 'maximize_window':
+            return self.maximize_window(kwargs.get('app_name'))
+        elif action == 'close_window':
+            return self.close_window(kwargs.get('app_name'))
+        elif action == 'focus_window':
+            return self.focus_window(kwargs.get('app_name', ''))
+        elif action == 'list_windows':
+            return self.list_windows()
+        
+        # App management
+        elif action == 'open_app':
+            return self.open_app(kwargs.get('app_name', ''))
+        elif action == 'close_app':
+            return self.close_app(kwargs.get('app_name', ''))
         
         # Clipboard
         elif action == 'copy':

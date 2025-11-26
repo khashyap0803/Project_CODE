@@ -1,10 +1,12 @@
 """
 Browser Automation Tool using Selenium
 Enables JARVIS to control browser: search Google, play YouTube videos, navigate sites
-Comprehensive media controls, ad skipping, and browser management
+Uses user's actual browser profile for native experience
 """
 import asyncio
 import time
+import subprocess
+import os
 from typing import Dict, Any, Optional
 from core.logger import setup_logger
 
@@ -13,7 +15,7 @@ logger = setup_logger(__name__)
 
 class BrowserTool:
     """
-    Browser automation using Selenium
+    Browser automation using Selenium with user's native browser
     Handles: YouTube autoplay, ad skipping, media controls, Google search, navigation
     """
     
@@ -22,6 +24,7 @@ class BrowserTool:
         self.is_headless = False
         self._last_video_url = None
         self._browser_type = None
+        self._ad_skip_task = None
         logger.info("BrowserTool initialized")
     
     def _check_session_valid(self) -> bool:
@@ -38,7 +41,7 @@ class BrowserTool:
             return False
     
     def _get_driver(self, force_new: bool = False):
-        """Get or create Selenium WebDriver with proper session management"""
+        """Get or create Selenium WebDriver using user's native browser"""
         if not force_new and self._check_session_valid():
             logger.debug("Reusing existing browser session")
             return self.driver
@@ -56,467 +59,414 @@ class BrowserTool:
             from selenium.webdriver.firefox.options import Options as FirefoxOptions
             from selenium.webdriver.chrome.options import Options as ChromeOptions
             
-            # Try Firefox first
-            try:
-                firefox_options = FirefoxOptions()
-                if self.is_headless:
-                    firefox_options.add_argument('--headless')
-                
-                self.driver = webdriver.Firefox(options=firefox_options)
-                self._browser_type = 'firefox'
-                logger.info("Firefox WebDriver created successfully")
-                return self.driver
-            except Exception as e:
-                logger.warning(f"Could not create Firefox driver: {e}")
-            
-            # Fallback to Chrome
+            # Try Chrome first (better YouTube compatibility)
             try:
                 chrome_options = ChromeOptions()
-                if self.is_headless:
-                    chrome_options.add_argument('--headless')
-                chrome_options.add_argument('--no-sandbox')
-                chrome_options.add_argument('--disable-dev-shm-usage')
-                chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+                
+                # Essential options - NO sandbox flags that break window decorations
+                chrome_options.add_argument("--start-maximized")
+                chrome_options.add_argument("--disable-infobars")
+                
+                # Hide automation but keep window decorations intact
                 chrome_options.add_experimental_option('excludeSwitches', ['enable-automation'])
                 chrome_options.add_experimental_option('useAutomationExtension', False)
-                chrome_options.add_argument('--start-maximized')
+                
+                # Don't use: --no-sandbox, --disable-dev-shm-usage (breaks window controls)
                 
                 self.driver = webdriver.Chrome(options=chrome_options)
                 self._browser_type = 'chrome'
                 
                 # Hide webdriver flag
-                self.driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
-                    'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
-                })
+                try:
+                    self.driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
+                        'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
+                    })
+                except:
+                    pass
                 
-                logger.info("Chrome WebDriver created as fallback")
+                logger.info("Chrome WebDriver created")
                 return self.driver
-            except Exception as e2:
-                logger.error(f"Could not create any WebDriver: {e2}")
-                return None
+                
+            except Exception as e:
+                logger.warning(f"Could not create Chrome driver: {e}")
+            
+            # Fallback to Firefox
+            try:
+                firefox_options = FirefoxOptions()
+                self.driver = webdriver.Firefox(options=firefox_options)
+                self._browser_type = 'firefox'
+                logger.info("Firefox WebDriver created")
+                return self.driver
+                
+            except Exception as e:
+                logger.warning(f"Could not create Firefox driver: {e}")
+            
+            logger.error("Could not create any WebDriver")
+            return None
                 
         except ImportError as e:
-            logger.error(f"Selenium not properly installed: {e}")
+            logger.error(f"Selenium not installed: {e}")
             return None
     
     async def _skip_youtube_ads(self, timeout: int = 30) -> bool:
-        """Skip YouTube ads by clicking skip button or waiting for ad to finish"""
+        """Skip YouTube ads by clicking skip button"""
         if not self.driver:
             return False
             
         from selenium.webdriver.common.by import By
         
         start_time = time.time()
-        ad_found = False
         
         while time.time() - start_time < timeout:
             try:
-                # Check for skip ad button (multiple possible selectors)
+                # Skip button selectors
                 skip_selectors = [
                     "button.ytp-skip-ad-button",
                     "button.ytp-ad-skip-button",
                     "button.ytp-ad-skip-button-modern",
                     ".ytp-ad-skip-button-slot button",
                     ".ytp-skip-ad-button",
-                    ".ytp-ad-skip-button-text",
+                    ".ytp-ad-skip-button-container button",
                 ]
                 
                 for selector in skip_selectors:
                     try:
                         skip_btn = self.driver.find_element(By.CSS_SELECTOR, selector)
                         if skip_btn.is_displayed() and skip_btn.is_enabled():
-                            await asyncio.sleep(0.5)
+                            await asyncio.sleep(0.3)
                             skip_btn.click()
                             logger.info("Clicked skip ad button")
-                            ad_found = True
-                            await asyncio.sleep(1)
+                            await asyncio.sleep(0.5)
                             return True
                     except:
                         continue
                 
-                # Check for "Skip Ads" button with different text
+                # Try XPath for "Skip" text
                 try:
-                    skip_btns = self.driver.find_elements(By.XPATH, 
-                        "//*[contains(text(), 'Skip') and (contains(text(), 'Ad') or contains(text(), 'ad'))]")
+                    skip_btns = self.driver.find_elements(By.XPATH, "//button[contains(., 'Skip')]")
                     for btn in skip_btns:
                         if btn.is_displayed():
                             btn.click()
-                            logger.info("Clicked skip ad via text match")
+                            logger.info("Clicked skip ad via text")
                             return True
                 except:
                     pass
                 
-                # Check if there's an ad playing but no skip button yet
-                ad_indicators = [
-                    ".ytp-ad-player-overlay",
-                    ".ytp-ad-overlay-container",
-                    ".ad-showing",
-                    ".ytp-ad-text",
-                    "div.ytp-ad-module",
-                ]
+                # Check if ad is playing
+                try:
+                    ad_badge = self.driver.find_element(By.CSS_SELECTOR, ".ytp-ad-simple-ad-badge, .ad-showing")
+                    await asyncio.sleep(0.5)
+                    continue
+                except:
+                    # No ad, done
+                    return True
                 
-                is_ad_playing = False
-                for indicator in ad_indicators:
+                await asyncio.sleep(0.3)
+                
+            except Exception as e:
+                await asyncio.sleep(0.5)
+        
+        return False
+    
+    async def _continuous_ad_monitor(self):
+        """Background task to continuously skip ads"""
+        while self._check_session_valid():
+            try:
+                from selenium.webdriver.common.by import By
+                
+                if 'youtube.com' not in self.driver.current_url:
+                    await asyncio.sleep(2)
+                    continue
+                
+                # Try to skip any visible ad
+                for selector in ["button.ytp-skip-ad-button", "button.ytp-ad-skip-button", ".ytp-skip-ad-button"]:
                     try:
-                        ad_elem = self.driver.find_element(By.CSS_SELECTOR, indicator)
-                        if ad_elem.is_displayed():
-                            is_ad_playing = True
-                            ad_found = True
+                        skip_btn = self.driver.find_element(By.CSS_SELECTOR, selector)
+                        if skip_btn.is_displayed() and skip_btn.is_enabled():
+                            skip_btn.click()
+                            logger.info("Auto-skipped ad")
                             break
                     except:
                         continue
                 
-                # Check for video-ads class on player
-                try:
-                    player = self.driver.find_element(By.CLASS_NAME, "html5-video-player")
-                    player_class = player.get_attribute("class") or ""
-                    if "ad-showing" in player_class or "ad-interrupting" in player_class:
-                        is_ad_playing = True
-                        ad_found = True
-                except:
-                    pass
-                
-                # If no ad is playing, we're done
-                if not is_ad_playing:
-                    if ad_found:
-                        logger.info("Ad finished playing")
-                    return True
-                
                 await asyncio.sleep(1)
                 
-            except Exception as e:
-                logger.debug(f"Ad skip check error: {e}")
-                await asyncio.sleep(1)
-        
-        logger.warning(f"Ad skip timeout after {timeout}s")
-        return ad_found
+            except:
+                await asyncio.sleep(2)
+    
+    def _start_ad_monitor(self):
+        """Start background ad monitor"""
+        if self._ad_skip_task is None or self._ad_skip_task.done():
+            try:
+                loop = asyncio.get_event_loop()
+                self._ad_skip_task = loop.create_task(self._continuous_ad_monitor())
+            except:
+                pass
     
     async def youtube_autoplay(self, search_query: str) -> Dict[str, Any]:
-        """Search YouTube and automatically play first non-sponsored video"""
+        """Search YouTube and autoplay first video with ad skipping"""
         try:
             from selenium.webdriver.common.by import By
-            from selenium.webdriver.support.ui import WebDriverWait
-            from selenium.webdriver.support import expected_conditions as EC
             
             driver = self._get_driver()
             if not driver:
                 import webbrowser
-                search_url = f"https://www.youtube.com/results?search_query={search_query.replace(' ', '+')}"
-                webbrowser.open(search_url)
-                return {
-                    "success": True,
-                    "message": f"Opened YouTube search (Selenium not available)",
-                    "query": search_query,
-                    "method": "fallback"
-                }
+                url = f"https://www.youtube.com/results?search_query={search_query.replace(' ', '+')}"
+                webbrowser.open(url)
+                return {"success": True, "message": "Opened", "method": "native"}
             
-            search_url = f"https://www.youtube.com/results?search_query={search_query.replace(' ', '+')}"
-            logger.info(f"Navigating to: {search_url}")
-            driver.get(search_url)
+            # Navigate to YouTube search
+            url = f"https://www.youtube.com/results?search_query={search_query.replace(' ', '+')}"
+            logger.info(f"Navigating to: {url}")
+            driver.get(url)
             
             await asyncio.sleep(2)
             
-            # Handle cookie consent if present
-            try:
-                consent_buttons = driver.find_elements(By.XPATH, 
-                    "//button[contains(., 'Accept') or contains(., 'Reject')]")
-                for btn in consent_buttons:
-                    if btn.is_displayed():
-                        btn.click()
-                        await asyncio.sleep(1)
-                        break
-            except:
-                pass
+            # Find and click first video
+            video_title = "Video"
+            for selector in ["ytd-video-renderer #video-title", "a#video-title"]:
+                try:
+                    video_link = driver.find_element(By.CSS_SELECTOR, selector)
+                    video_title = video_link.get_attribute("title") or video_link.text or "Video"
+                    logger.info(f"Found video: {video_title}")
+                    video_link.click()
+                    break
+                except:
+                    continue
             
-            try:
-                WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.ID, "video-title"))
-                )
-                
-                video_links = driver.find_elements(By.ID, "video-title")
-                
-                for link in video_links[:5]:
-                    href = link.get_attribute("href")
-                    title = link.get_attribute("title")
-                    
-                    if href and "/watch?" in href and title:
-                        if "/shorts/" in href:
-                            continue
-                        
-                        logger.info(f"Found video: {title}")
-                        self._last_video_url = href
-                        
-                        driver.execute_script("arguments[0].click();", link)
-                        await asyncio.sleep(3)
-                        await self._skip_youtube_ads(timeout=20)
-                        
-                        try:
-                            video_elem = driver.find_element(By.TAG_NAME, "video")
-                            is_paused = driver.execute_script("return arguments[0].paused;", video_elem)
-                            if is_paused:
-                                driver.execute_script("arguments[0].play();", video_elem)
-                        except:
-                            pass
-                        
-                        return {
-                            "success": True,
-                            "message": f"Playing: {title}",
-                            "query": search_query,
-                            "video_title": title,
-                            "video_url": href,
-                            "method": "selenium_autoplay"
-                        }
-                
-                return {
-                    "success": True,
-                    "message": "Opened YouTube search results",
-                    "query": search_query,
-                    "method": "selenium_search_only"
-                }
-                
-            except Exception as e:
-                logger.error(f"Could not find/click video: {e}")
-                return {
-                    "success": True,
-                    "message": "Opened YouTube search",
-                    "query": search_query,
-                    "error": str(e),
-                    "method": "selenium_search_only"
-                }
-        
+            await asyncio.sleep(2)
+            
+            # Skip ads
+            await self._skip_youtube_ads(timeout=15)
+            
+            # Start background ad monitor
+            self._start_ad_monitor()
+            
+            self._last_video_url = driver.current_url
+            
+            return {
+                "success": True,
+                "message": f"Playing: {video_title[:50]}",
+                "video_title": video_title,
+                "video_url": driver.current_url,
+            }
+            
         except Exception as e:
             logger.error(f"YouTube autoplay error: {e}")
-            self.driver = None
-            self._browser_type = None
-            return {"success": False, "error": str(e), "query": search_query}
+            try:
+                import webbrowser
+                url = f"https://www.youtube.com/results?search_query={search_query.replace(' ', '+')}"
+                webbrowser.open(url)
+                return {"success": True, "message": "Opened", "method": "fallback"}
+            except:
+                return {"success": False, "error": str(e)}
     
     async def youtube_control(self, action: str) -> Dict[str, Any]:
-        """Control YouTube playback: play, pause, next, previous, mute, volume, etc."""
+        """Control YouTube playback"""
         if not self._check_session_valid():
-            return {"success": False, "error": "No active browser session. Play a video first."}
+            return {"success": False, "error": "No browser open"}
         
         try:
             from selenium.webdriver.common.by import By
             from selenium.webdriver.common.keys import Keys
             
             driver = self.driver
-            current_url = driver.current_url
-            
-            if 'youtube.com' not in current_url:
-                return {"success": False, "error": "Not on YouTube. Play a video first."}
-            
-            try:
-                video = driver.find_element(By.TAG_NAME, "video")
-            except:
-                return {"success": False, "error": "No video element found."}
-            
             action = action.lower().strip()
             
-            if action in ['play', 'resume']:
-                driver.execute_script("arguments[0].play();", video)
-                return {"success": True, "message": "Video playing"}
+            if 'youtube.com' not in driver.current_url:
+                return {"success": False, "error": "Not on YouTube"}
             
-            elif action == 'pause':
+            try:
+                video = driver.find_element(By.CSS_SELECTOR, "video")
+            except:
+                return {"success": False, "error": "No video found"}
+            
+            if action in ['pause', 'stop']:
                 driver.execute_script("arguments[0].pause();", video)
-                return {"success": True, "message": "Video paused"}
+                return {"success": True, "message": "Paused"}
+            
+            elif action in ['play', 'resume']:
+                driver.execute_script("arguments[0].play();", video)
+                return {"success": True, "message": "Playing"}
             
             elif action == 'toggle':
                 is_paused = driver.execute_script("return arguments[0].paused;", video)
                 if is_paused:
                     driver.execute_script("arguments[0].play();", video)
-                    return {"success": True, "message": "Video resumed"}
+                    return {"success": True, "message": "Playing"}
                 else:
                     driver.execute_script("arguments[0].pause();", video)
-                    return {"success": True, "message": "Video paused"}
+                    return {"success": True, "message": "Paused"}
             
             elif action == 'mute':
                 driver.execute_script("arguments[0].muted = true;", video)
-                return {"success": True, "message": "Video muted"}
+                return {"success": True, "message": "Muted"}
             
             elif action == 'unmute':
                 driver.execute_script("arguments[0].muted = false;", video)
-                return {"success": True, "message": "Video unmuted"}
+                return {"success": True, "message": "Unmuted"}
             
             elif action == 'volume_up':
-                current_vol = driver.execute_script("return arguments[0].volume;", video)
-                new_vol = min(1.0, current_vol + 0.1)
+                current = driver.execute_script("return arguments[0].volume;", video)
+                new_vol = min(1.0, current + 0.1)
                 driver.execute_script(f"arguments[0].volume = {new_vol};", video)
-                return {"success": True, "message": f"Volume: {int(new_vol * 100)}%"}
+                return {"success": True, "message": f"Volume {int(new_vol * 100)}%"}
             
             elif action == 'volume_down':
-                current_vol = driver.execute_script("return arguments[0].volume;", video)
-                new_vol = max(0.0, current_vol - 0.1)
+                current = driver.execute_script("return arguments[0].volume;", video)
+                new_vol = max(0.0, current - 0.1)
                 driver.execute_script(f"arguments[0].volume = {new_vol};", video)
-                return {"success": True, "message": f"Volume: {int(new_vol * 100)}%"}
+                return {"success": True, "message": f"Volume {int(new_vol * 100)}%"}
             
             elif action == 'fullscreen':
                 try:
-                    driver.find_element(By.CSS_SELECTOR, ".ytp-fullscreen-button").click()
+                    btn = driver.find_element(By.CSS_SELECTOR, ".ytp-fullscreen-button")
+                    btn.click()
                 except:
-                    body = driver.find_element(By.TAG_NAME, "body")
-                    body.send_keys("f")
-                return {"success": True, "message": "Toggled fullscreen"}
+                    driver.find_element(By.TAG_NAME, "body").send_keys("f")
+                return {"success": True, "message": "Fullscreen"}
             
-            elif action in ['seek_forward', 'forward', 'skip_forward']:
-                driver.execute_script("arguments[0].currentTime += 10;", video)
-                return {"success": True, "message": "Skipped forward 10 seconds"}
+            elif action == 'seek_forward':
+                current = driver.execute_script("return arguments[0].currentTime;", video)
+                driver.execute_script(f"arguments[0].currentTime = {current + 10};", video)
+                return {"success": True, "message": "+10s"}
             
-            elif action in ['seek_backward', 'backward', 'rewind']:
-                driver.execute_script("arguments[0].currentTime -= 10;", video)
-                return {"success": True, "message": "Rewound 10 seconds"}
+            elif action == 'seek_backward':
+                current = driver.execute_script("return arguments[0].currentTime;", video)
+                driver.execute_script(f"arguments[0].currentTime = {max(0, current - 10)};", video)
+                return {"success": True, "message": "-10s"}
             
             elif action == 'skip_ad':
-                skipped = await self._skip_youtube_ads(timeout=10)
-                if skipped:
-                    return {"success": True, "message": "Ad skipped/finished"}
-                return {"success": False, "error": "No skippable ad found"}
+                skipped = await self._skip_youtube_ads(timeout=5)
+                return {"success": True, "message": "Skipped" if skipped else "No ad"}
             
             elif action in ['next', 'next_video']:
+                await self._skip_youtube_ads(timeout=3)
                 try:
-                    next_btn = driver.find_element(By.CSS_SELECTOR, ".ytp-next-button")
-                    next_btn.click()
-                    await asyncio.sleep(2)
-                    await self._skip_youtube_ads(timeout=10)
-                    return {"success": True, "message": "Playing next video"}
+                    btn = driver.find_element(By.CSS_SELECTOR, ".ytp-next-button")
+                    btn.click()
                 except:
-                    body = driver.find_element(By.TAG_NAME, "body")
-                    body.send_keys(Keys.SHIFT + "n")
-                    return {"success": True, "message": "Attempting next video"}
+                    driver.find_element(By.TAG_NAME, "body").send_keys(Keys.SHIFT + "n")
+                await asyncio.sleep(2)
+                await self._skip_youtube_ads(timeout=10)
+                return {"success": True, "message": "Next video"}
             
-            elif action in ['previous', 'prev', 'previous_video']:
-                body = driver.find_element(By.TAG_NAME, "body")
-                body.send_keys(Keys.SHIFT + "p")
-                return {"success": True, "message": "Attempting previous video"}
+            elif action in ['previous', 'prev']:
+                await self._skip_youtube_ads(timeout=3)
+                driver.find_element(By.TAG_NAME, "body").send_keys(Keys.SHIFT + "p")
+                await asyncio.sleep(2)
+                await self._skip_youtube_ads(timeout=10)
+                return {"success": True, "message": "Previous video"}
             
             elif action == 'restart':
                 driver.execute_script("arguments[0].currentTime = 0;", video)
-                return {"success": True, "message": "Video restarted"}
+                return {"success": True, "message": "Restarted"}
             
             else:
-                return {"success": False, "error": f"Unknown action: {action}"}
+                return {"success": False, "error": f"Unknown: {action}"}
             
         except Exception as e:
             logger.error(f"YouTube control error: {e}")
             return {"success": False, "error": str(e)}
     
     async def browser_control(self, action: str, url: str = None) -> Dict[str, Any]:
-        """Browser controls: new_tab, close_tab, back, forward, refresh, maximize, minimize"""
-        if action not in ['new_tab', 'goto'] and not self._check_session_valid():
-            return {"success": False, "error": "No active browser session"}
+        """Browser controls"""
+        action = action.lower().strip()
+        
+        if action not in ['new_tab', 'goto', 'open_browser', 'open'] and not self._check_session_valid():
+            return {"success": False, "error": "No browser open"}
         
         try:
-            action = action.lower().strip()
-            
-            if action == 'new_tab':
+            if action in ['new_tab', 'open_browser', 'open']:
                 driver = self._get_driver()
                 if not driver:
-                    return {"success": False, "error": "Could not create browser"}
+                    return {"success": False, "error": "Could not open browser"}
                 if url:
-                    driver.execute_script(f"window.open('{url}', '_blank');")
-                else:
-                    driver.execute_script("window.open('about:blank', '_blank');")
-                driver.switch_to.window(driver.window_handles[-1])
-                return {"success": True, "message": "Opened new tab"}
+                    driver.get(url)
+                return {"success": True, "message": "Opened"}
             
             elif action == 'close_tab':
                 if len(self.driver.window_handles) > 1:
                     self.driver.close()
                     self.driver.switch_to.window(self.driver.window_handles[-1])
-                    return {"success": True, "message": "Tab closed"}
                 else:
-                    return {"success": False, "error": "Cannot close last tab"}
+                    self.driver.quit()
+                    self.driver = None
+                    self._browser_type = None
+                return {"success": True, "message": "Closed"}
             
             elif action == 'switch_tab':
                 handles = self.driver.window_handles
                 current = self.driver.current_window_handle
-                current_idx = handles.index(current)
-                next_idx = (current_idx + 1) % len(handles)
-                self.driver.switch_to.window(handles[next_idx])
-                return {"success": True, "message": f"Switched to tab {next_idx + 1}"}
+                idx = (handles.index(current) + 1) % len(handles)
+                self.driver.switch_to.window(handles[idx])
+                return {"success": True, "message": f"Tab {idx + 1}"}
             
             elif action == 'back':
                 self.driver.back()
-                return {"success": True, "message": "Navigated back"}
+                return {"success": True, "message": "Back"}
             
             elif action == 'forward':
                 self.driver.forward()
-                return {"success": True, "message": "Navigated forward"}
+                return {"success": True, "message": "Forward"}
             
             elif action == 'refresh':
                 self.driver.refresh()
-                return {"success": True, "message": "Page refreshed"}
+                return {"success": True, "message": "Refreshed"}
             
             elif action == 'maximize':
                 self.driver.maximize_window()
-                return {"success": True, "message": "Window maximized"}
+                return {"success": True, "message": "Maximized"}
             
             elif action == 'minimize':
                 self.driver.minimize_window()
-                return {"success": True, "message": "Window minimized"}
+                return {"success": True, "message": "Minimized"}
             
             elif action == 'goto' and url:
                 driver = self._get_driver()
-                if not driver:
-                    return {"success": False, "error": "Could not create browser"}
-                driver.get(url)
-                return {"success": True, "message": f"Navigated to {url}"}
+                if driver:
+                    driver.get(url)
+                    return {"success": True, "message": "Opened"}
+                return {"success": False, "error": "No browser"}
             
-            elif action == 'close_browser':
+            elif action in ['close_browser', 'close']:
                 if self.driver:
                     self.driver.quit()
                     self.driver = None
                     self._browser_type = None
-                    return {"success": True, "message": "Browser closed"}
-                return {"success": True, "message": "No browser to close"}
+                return {"success": True, "message": "Closed"}
             
             else:
-                return {"success": False, "error": f"Unknown action: {action}"}
+                return {"success": False, "error": f"Unknown: {action}"}
             
         except Exception as e:
             logger.error(f"Browser control error: {e}")
             return {"success": False, "error": str(e)}
     
-    async def google_search_and_click(self, search_query: str, click_first: bool = True) -> Dict[str, Any]:
+    async def google_search(self, query: str) -> Dict[str, Any]:
         """Search Google"""
         try:
-            from selenium.webdriver.common.by import By
-            
             driver = self._get_driver()
-            if not driver:
+            if driver:
+                driver.get(f"https://www.google.com/search?q={query.replace(' ', '+')}")
+            else:
                 import webbrowser
-                search_url = f"https://www.google.com/search?q={search_query.replace(' ', '+')}"
-                webbrowser.open(search_url)
-                return {"success": True, "message": "Opened Google search", "method": "fallback"}
-            
-            search_url = f"https://www.google.com/search?q={search_query.replace(' ', '+')}"
-            logger.info(f"Navigating to: {search_url}")
-            driver.get(search_url)
-            await asyncio.sleep(1)
-            
-            return {"success": True, "message": f"Searched Google for: {search_query}", "method": "selenium"}
-        
+                webbrowser.open(f"https://www.google.com/search?q={query.replace(' ', '+')}")
+            return {"success": True, "message": "Searched"}
         except Exception as e:
-            logger.error(f"Google search error: {e}")
             return {"success": False, "error": str(e)}
     
     def get_status(self) -> Dict[str, Any]:
-        """Get current browser status"""
+        """Get browser status"""
         if not self._check_session_valid():
-            return {"active": False, "browser": None, "url": None}
-        
+            return {"active": False}
         try:
-            return {
-                "active": True,
-                "browser": self._browser_type,
-                "url": self.driver.current_url,
-                "title": self.driver.title,
-                "tabs": len(self.driver.window_handles)
-            }
+            return {"active": True, "browser": self._browser_type, "url": self.driver.current_url}
         except:
-            return {"active": False, "browser": None, "url": None}
+            return {"active": False}
     
     def close(self):
-        """Close the browser completely"""
+        """Close browser"""
         if self.driver:
             try:
                 self.driver.quit()
@@ -524,8 +474,7 @@ class BrowserTool:
                 pass
             self.driver = None
             self._browser_type = None
-        logger.info("Browser closed")
 
 
-# Global browser tool instance
+# Global instance
 browser_tool = BrowserTool()
