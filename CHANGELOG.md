@@ -2,6 +2,94 @@
 
 All notable changes to the JARVIS Voice Assistant project are documented in this file.
 
+## [3.0.0-v4] - 2025-11-27
+
+### 🎮 Complete Browser & System Control Release
+
+#### YouTube Controls (NEW)
+- **Full media playback control:**
+  - `pause`, `play/resume`, `toggle playback`
+  - `next video`, `previous video`
+  - `mute`, `unmute` video audio
+  - `volume up/down` for video
+  - `fullscreen`, `skip forward/backward` (10 seconds)
+  - `skip ad` - manual ad skip trigger
+  - `restart` - restart current video from beginning
+
+#### Automatic Ad Skipping
+- **Comprehensive ad detection and skipping:**
+  - Multiple CSS selectors for "Skip Ad" button detection
+  - XPath fallback for text-based skip detection
+  - Automatic wait and skip during video playback
+  - Works with YouTube's evolving ad formats
+
+#### Browser Session Management (FIXED)
+- **Robust session handling:**
+  - `_check_session_valid()` - Validates browser session before operations
+  - Auto-recreation of WebDriver when session is invalid
+  - Proper cleanup of stale sessions
+  - Fixed "invalid session id" errors when browser closes
+
+#### Browser Controls (NEW)
+- **Full browser window control:**
+  - `new_tab`, `close_tab`, `switch_tab`
+  - `back`, `forward`, `refresh`
+  - `maximize`, `minimize`
+  - `goto` - navigate to specific URL
+  - `close_browser` - gracefully close browser
+
+#### System Controls (NEW `tools/system_control.py`)
+- **Volume Control:**
+  - Auto-detects audio backend: wpctl (PipeWire), pactl (PulseAudio), amixer (ALSA)
+  - `volume up/down` (10% increments)
+  - `set volume to X%`
+  - `mute/unmute system`
+  - Get current volume level
+
+- **Brightness Control:**
+  - `brightness up/down` (10% increments)
+  - `set brightness to X%`
+  - Uses brightnessctl with xrandr fallback
+
+- **Screenshots:**
+  - `take screenshot` - full screen capture
+  - Saves to ~/Pictures/screenshot_YYYYMMDD_HHMMSS.png
+
+- **Power Management:**
+  - `shutdown`, `restart`, `suspend/sleep`
+  - `lock screen`
+
+- **Connectivity:**
+  - `wifi on/off`
+  - `bluetooth on/off`
+
+- **Notifications:**
+  - System notification support via notify-send/dbus-send
+
+#### Tool Detection Patterns (Updated)
+- **YouTube control phrases:**
+  - "pause the video", "pause it", "stop playing"
+  - "resume playing", "play the video", "continue playing"
+  - "next video", "skip video", "previous video"
+  - "mute video", "unmute", "fullscreen"
+  - "skip forward", "rewind", "skip ad"
+
+- **System control phrases:**
+  - "increase/decrease the volume", "set volume to 50"
+  - "increase/decrease brightness", "set brightness to 80"
+  - "take screenshot", "lock screen"
+  - "shutdown", "restart", "sleep"
+  - "unmute the system", "mute the audio"
+
+#### Bug Fixes
+- Fixed Firefox driver error ("binary is not a Firefox executable") - now gracefully falls back to Chrome
+- Fixed Chrome automation detection - proper stealth mode configuration
+- Fixed session persistence between requests
+- Fixed volume control on PipeWire systems (Ubuntu 24.04+)
+- Improved tool pattern matching for natural language commands
+
+---
+
 ## [3.0.0-v3] - 2025-11-27
 
 ### 🎯 Production-Ready Release

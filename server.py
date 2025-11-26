@@ -39,6 +39,16 @@ except Exception as e:
     BROWSER_AUTOMATION_AVAILABLE = False
     logger.warning(f"Browser automation not available: {e}")
 
+# Try to import system control
+try:
+    from tools.system_control import system_control
+    SYSTEM_CONTROL_AVAILABLE = True
+    logger.info("System control available")
+except Exception as e:
+    system_control = None
+    SYSTEM_CONTROL_AVAILABLE = False
+    logger.warning(f"System control not available: {e}")
+
 # Initialize FastAPI app
 app = FastAPI(
     title="JARVIS Voice Assistant",
@@ -559,6 +569,135 @@ def detect_tool_intent(query: str) -> Optional[tuple[str, dict]]:
         if match:
             return ('run_command', {'command': match.group(1)})
     
+    # === YouTube Media Controls ===
+    if BROWSER_AUTOMATION_AVAILABLE:
+        # Pause video
+        if any(phrase in query_lower for phrase in ['pause the video', 'pause video', 'pause the song', 'pause song', 'pause youtube', 'pause it', 'pause playback', 'stop the video', 'stop video', 'stop playing', 'pause the music', 'pause music']):
+            return ('youtube_control', {'action': 'pause'})
+        
+        # Play/Resume video
+        if any(phrase in query_lower for phrase in ['play the video', 'play video', 'resume the video', 'resume video', 'resume playback', 'continue playing', 'play it', 'resume playing', 'unpause', 'unpause video', 'start playing again']):
+            if 'youtube' not in query_lower or 'in youtube' not in query_lower:
+                return ('youtube_control', {'action': 'play'})
+        
+        # Next video
+        if any(phrase in query_lower for phrase in ['next video', 'next song', 'skip video', 'skip song', 'play next']):
+            return ('youtube_control', {'action': 'next'})
+        
+        # Previous video
+        if any(phrase in query_lower for phrase in ['previous video', 'previous song', 'go back', 'play previous']):
+            return ('youtube_control', {'action': 'previous'})
+        
+        # Mute/Unmute (for video/youtube only)
+        if 'mute' in query_lower and 'unmute' not in query_lower:
+            if any(phrase in query_lower for phrase in ['mute video', 'mute the video', 'mute youtube', 'mute it']):
+                return ('youtube_control', {'action': 'mute'})
+        if 'unmute' in query_lower and ('video' in query_lower or 'youtube' in query_lower or query_lower.strip() == 'unmute'):
+            return ('youtube_control', {'action': 'unmute'})
+        
+        # Volume controls for video
+        if 'video volume' in query_lower or 'youtube volume' in query_lower:
+            if 'up' in query_lower or 'increase' in query_lower:
+                return ('youtube_control', {'action': 'volume_up'})
+            if 'down' in query_lower or 'decrease' in query_lower:
+                return ('youtube_control', {'action': 'volume_down'})
+        
+        # Fullscreen
+        if any(phrase in query_lower for phrase in ['fullscreen', 'full screen', 'maximize video']):
+            return ('youtube_control', {'action': 'fullscreen'})
+        
+        # Skip forward/backward
+        if any(phrase in query_lower for phrase in ['skip forward', 'fast forward', 'forward 10']):
+            return ('youtube_control', {'action': 'seek_forward'})
+        if any(phrase in query_lower for phrase in ['rewind', 'go back 10', 'skip backward']):
+            return ('youtube_control', {'action': 'seek_backward'})
+        
+        # Skip ad
+        if any(phrase in query_lower for phrase in ['skip ad', 'skip the ad', 'skip advertisement']):
+            return ('youtube_control', {'action': 'skip_ad'})
+        
+        # Browser controls
+        if any(phrase in query_lower for phrase in ['close browser', 'close the browser', 'exit browser']):
+            return ('browser_control', {'action': 'close_browser'})
+        if any(phrase in query_lower for phrase in ['new tab', 'open new tab', 'open a new tab']):
+            return ('browser_control', {'action': 'new_tab'})
+        if any(phrase in query_lower for phrase in ['close tab', 'close this tab', 'close the tab']):
+            return ('browser_control', {'action': 'close_tab'})
+        if any(phrase in query_lower for phrase in ['refresh page', 'refresh the page', 'reload page']):
+            return ('browser_control', {'action': 'refresh'})
+        if any(phrase in query_lower for phrase in ['go back', 'back page', 'previous page']) and 'video' not in query_lower:
+            return ('browser_control', {'action': 'back'})
+    
+    # === System Controls ===
+    if SYSTEM_CONTROL_AVAILABLE:
+        # Volume controls (system)
+        if 'volume' in query_lower and 'video' not in query_lower and 'youtube' not in query_lower:
+            if any(word in query_lower for word in ['up', 'increase', 'raise', 'higher']):
+                return ('system_control', {'action': 'volume_up'})
+            if any(word in query_lower for word in ['down', 'decrease', 'lower', 'reduce']):
+                return ('system_control', {'action': 'volume_down'})
+            if 'mute' in query_lower and 'unmute' not in query_lower:
+                return ('system_control', {'action': 'mute'})
+            if 'unmute' in query_lower:
+                return ('system_control', {'action': 'unmute'})
+            # Set volume to specific level
+            match = re.search(r'volume\s+(?:to\s+)?(\d+)', query_lower)
+            if match:
+                return ('system_control', {'action': 'volume_set', 'level': int(match.group(1))})
+        
+        # Mute/Unmute without "volume" word (system level, not video)
+        if 'video' not in query_lower and 'youtube' not in query_lower:
+            if 'unmute' in query_lower and any(word in query_lower for word in ['system', 'computer', 'audio', 'sound']):
+                return ('system_control', {'action': 'unmute'})
+            if 'mute' in query_lower and 'unmute' not in query_lower and any(word in query_lower for word in ['system', 'computer', 'audio', 'sound']):
+                return ('system_control', {'action': 'mute'})
+        
+        # Brightness controls
+        if 'brightness' in query_lower:
+            if any(word in query_lower for word in ['up', 'increase', 'raise', 'higher']):
+                return ('system_control', {'action': 'brightness_up'})
+            if any(word in query_lower for word in ['down', 'decrease', 'lower', 'reduce']):
+                return ('system_control', {'action': 'brightness_down'})
+            match = re.search(r'brightness\s+(?:to\s+)?(\d+)', query_lower)
+            if match:
+                return ('system_control', {'action': 'brightness_set', 'level': int(match.group(1))})
+        
+        # Screenshot
+        if any(phrase in query_lower for phrase in ['take screenshot', 'take a screenshot', 'capture screen', 'screenshot']):
+            return ('system_control', {'action': 'screenshot'})
+        
+        # Lock screen
+        if any(phrase in query_lower for phrase in ['lock screen', 'lock the screen', 'lock computer', 'lock my computer']):
+            return ('system_control', {'action': 'lock'})
+        
+        # Sleep/Suspend
+        if any(phrase in query_lower for phrase in ['go to sleep', 'sleep mode', 'suspend', 'put to sleep']):
+            return ('system_control', {'action': 'suspend'})
+        
+        # Shutdown
+        if any(phrase in query_lower for phrase in ['shut down', 'shutdown', 'power off', 'turn off computer']):
+            return ('system_control', {'action': 'shutdown'})
+        
+        # Restart
+        if any(phrase in query_lower for phrase in ['restart', 'reboot', 'restart computer']):
+            return ('system_control', {'action': 'restart'})
+        
+        # WiFi controls
+        if 'wifi' in query_lower or 'wi-fi' in query_lower:
+            if any(word in query_lower for word in ['on', 'enable', 'turn on']):
+                return ('system_control', {'action': 'wifi_on'})
+            if any(word in query_lower for word in ['off', 'disable', 'turn off']):
+                return ('system_control', {'action': 'wifi_off'})
+            if 'status' in query_lower:
+                return ('system_control', {'action': 'wifi_status'})
+        
+        # Bluetooth controls
+        if 'bluetooth' in query_lower:
+            if any(word in query_lower for word in ['on', 'enable', 'turn on']):
+                return ('system_control', {'action': 'bluetooth_on'})
+            if any(word in query_lower for word in ['off', 'disable', 'turn off']):
+                return ('system_control', {'action': 'bluetooth_off'})
+    
     return None
 
 async def generate_response(
@@ -631,6 +770,28 @@ Provide a natural summary of what the user did or asked previously."""
             if tool_name == 'youtube_autoplay' and BROWSER_AUTOMATION_AVAILABLE:
                 tool_result = await browser_tool.youtube_autoplay(parameters['search_query'])
                 logger.info(f"YouTube autoplay result: {tool_result}")
+            
+            # YouTube media controls
+            elif tool_name == 'youtube_control' and BROWSER_AUTOMATION_AVAILABLE:
+                tool_result = await browser_tool.youtube_control(parameters['action'])
+                logger.info(f"YouTube control result: {tool_result}")
+            
+            # Browser controls
+            elif tool_name == 'browser_control' and BROWSER_AUTOMATION_AVAILABLE:
+                tool_result = await browser_tool.browser_control(
+                    parameters['action'], 
+                    parameters.get('url')
+                )
+                logger.info(f"Browser control result: {tool_result}")
+            
+            # System controls
+            elif tool_name == 'system_control' and SYSTEM_CONTROL_AVAILABLE:
+                tool_result = system_control.execute_control(
+                    parameters['action'],
+                    **{k: v for k, v in parameters.items() if k != 'action'}
+                )
+                logger.info(f"System control result: {tool_result}")
+            
             else:
                 # Execute tool through tool_manager
                 tool_result = await tool_manager.execute_tool(tool_name, parameters)
