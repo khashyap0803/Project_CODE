@@ -500,9 +500,26 @@ def detect_tool_intent(query: str) -> Optional[tuple[str, dict]]:
                 return ('open_url', {'url': f'https://www.youtube.com/results?search_query={search_encoded}'})
     
     action_present = any(word in query_lower for word in ACTION_VERBS)
+    
+    # === Browser Controls (check BEFORE generic app launch) ===
+    if BROWSER_AUTOMATION_AVAILABLE:
+        # Browser open/close controls
+        if any(phrase in query_lower for phrase in ['open browser', 'open the browser', 'launch browser', 'start browser']):
+            return ('browser_control', {'action': 'open_browser'})
+        if any(phrase in query_lower for phrase in ['close browser', 'close the browser', 'exit browser', 'quit browser']):
+            return ('browser_control', {'action': 'close_browser'})
+        if any(phrase in query_lower for phrase in ['new tab', 'open new tab', 'open a new tab', 'open tab']):
+            return ('browser_control', {'action': 'new_tab'})
+        if any(phrase in query_lower for phrase in ['close tab', 'close this tab', 'close the tab']):
+            return ('browser_control', {'action': 'close_tab'})
+    
     if action_present:
         matched = False
+        # Skip browser keyword if browser automation is handling it
         for keyword, canonical in APP_KEYWORDS.items():
+            # Don't match 'browser' if browser automation is available
+            if keyword == 'browser' and BROWSER_AUTOMATION_AVAILABLE:
+                continue
             pattern = r'\b' + re.escape(keyword) + r'\b'
             if re.search(pattern, query_lower):
                 matched = True
@@ -575,18 +592,18 @@ def detect_tool_intent(query: str) -> Optional[tuple[str, dict]]:
         if query_lower.strip() == 'pause' or any(phrase in query_lower for phrase in ['pause the video', 'pause video', 'pause the song', 'pause song', 'pause youtube', 'pause it', 'pause playback', 'stop the video', 'stop video', 'stop playing', 'pause the music', 'pause music']):
             return ('youtube_control', {'action': 'pause'})
         
+        # Next video - check BEFORE play to avoid conflict
+        if any(phrase in query_lower for phrase in ['next video', 'next song', 'skip video', 'skip song', 'play next']):
+            return ('youtube_control', {'action': 'next'})
+        
+        # Previous video - check BEFORE play to avoid conflict with "play previous video"
+        if any(phrase in query_lower for phrase in ['previous video', 'previous song', 'go back video', 'play previous', 'last video', 'last song']):
+            return ('youtube_control', {'action': 'previous'})
+        
         # Play/Resume video - check if just "play" or "resume" with no other context
         if query_lower.strip() in ['play', 'resume'] or any(phrase in query_lower for phrase in ['play the video', 'play video', 'resume the video', 'resume video', 'resume playback', 'continue playing', 'play it', 'resume playing', 'unpause', 'unpause video', 'start playing again']):
             if 'youtube' not in query_lower or 'in youtube' not in query_lower:
                 return ('youtube_control', {'action': 'play'})
-        
-        # Next video
-        if any(phrase in query_lower for phrase in ['next video', 'next song', 'skip video', 'skip song', 'play next']):
-            return ('youtube_control', {'action': 'next'})
-        
-        # Previous video
-        if any(phrase in query_lower for phrase in ['previous video', 'previous song', 'go back', 'play previous']):
-            return ('youtube_control', {'action': 'previous'})
         
         # Mute/Unmute (for video/youtube only)
         if 'mute' in query_lower and 'unmute' not in query_lower:
@@ -616,15 +633,7 @@ def detect_tool_intent(query: str) -> Optional[tuple[str, dict]]:
         if any(phrase in query_lower for phrase in ['skip ad', 'skip the ad', 'skip advertisement']):
             return ('youtube_control', {'action': 'skip_ad'})
         
-        # Browser controls
-        if any(phrase in query_lower for phrase in ['open browser', 'open the browser', 'launch browser', 'start browser']):
-            return ('browser_control', {'action': 'open_browser'})
-        if any(phrase in query_lower for phrase in ['close browser', 'close the browser', 'exit browser', 'quit browser']):
-            return ('browser_control', {'action': 'close_browser'})
-        if any(phrase in query_lower for phrase in ['new tab', 'open new tab', 'open a new tab', 'open tab']):
-            return ('browser_control', {'action': 'new_tab'})
-        if any(phrase in query_lower for phrase in ['close tab', 'close this tab', 'close the tab']):
-            return ('browser_control', {'action': 'close_tab'})
+        # Browser controls (additional controls - open/close/tab handled earlier)
         if any(phrase in query_lower for phrase in ['refresh page', 'refresh the page', 'reload page', 'refresh']):
             return ('browser_control', {'action': 'refresh'})
         if any(phrase in query_lower for phrase in ['go back', 'back page', 'previous page']) and 'video' not in query_lower:
@@ -718,24 +727,28 @@ def detect_tool_intent(query: str) -> Optional[tuple[str, dict]]:
         if any(phrase in query_lower for phrase in ['hibernate', 'hibernation']):
             return ('system_control', {'action': 'hibernate'})
         
-        # Window management - minimize
-        if any(phrase in query_lower for phrase in ['minimize window', 'minimize the window', 'minimize app', 'minimize application']):
-            # Extract app name if present
-            match = re.search(r'minimize\s+(?:the\s+)?(?:window\s+)?(?:of\s+)?(.+?)(?:\s+window|\s+app)?$', query_lower)
-            app_name = match.group(1).strip() if match and match.group(1).strip() not in ['window', 'app', 'application', 'the'] else None
-            return ('system_control', {'action': 'minimize_window', 'app_name': app_name})
+        # Window/App management - Close app (e.g., "close arduino ide", "close firefox")
+        # Must check this BEFORE generic window patterns
+        close_app_match = re.search(r'close\s+(?:the\s+)?([a-zA-Z0-9 _-]+?)(?:\s+window|\s+app|\s+application)?$', query_lower)
+        if close_app_match and 'browser' not in query_lower and 'tab' not in query_lower:
+            app_name = close_app_match.group(1).strip()
+            # Filter out generic words
+            if app_name and app_name not in ['window', 'app', 'application', 'the', 'this', 'that']:
+                return ('system_control', {'action': 'close_app', 'app_name': app_name})
         
-        # Window management - maximize
-        if any(phrase in query_lower for phrase in ['maximize window', 'maximize the window', 'maximize app', 'maximize application']):
-            match = re.search(r'maximize\s+(?:the\s+)?(?:window\s+)?(?:of\s+)?(.+?)(?:\s+window|\s+app)?$', query_lower)
-            app_name = match.group(1).strip() if match and match.group(1).strip() not in ['window', 'app', 'application', 'the'] else None
-            return ('system_control', {'action': 'maximize_window', 'app_name': app_name})
+        # Window/App management - Minimize app (e.g., "minimize arduino ide", "minimize firefox")
+        minimize_match = re.search(r'minimize\s+(?:the\s+)?([a-zA-Z0-9 _-]+?)(?:\s+window|\s+app|\s+application)?$', query_lower)
+        if minimize_match:
+            app_name = minimize_match.group(1).strip()
+            if app_name and app_name not in ['window', 'app', 'application', 'the', 'this', 'that']:
+                return ('system_control', {'action': 'minimize_window', 'app_name': app_name})
         
-        # Window management - close window (not browser)
-        if any(phrase in query_lower for phrase in ['close window', 'close the window', 'close app', 'close application']) and 'browser' not in query_lower:
-            match = re.search(r'close\s+(?:the\s+)?(?:window\s+)?(?:of\s+)?(.+?)(?:\s+window|\s+app)?$', query_lower)
-            app_name = match.group(1).strip() if match and match.group(1).strip() not in ['window', 'app', 'application', 'the'] else None
-            return ('system_control', {'action': 'close_window', 'app_name': app_name})
+        # Window/App management - Maximize app (e.g., "maximize arduino ide", "maximize vs code")
+        maximize_match = re.search(r'maximize\s+(?:the\s+)?([a-zA-Z0-9 _-]+?)(?:\s+window|\s+app|\s+application)?$', query_lower)
+        if maximize_match:
+            app_name = maximize_match.group(1).strip()
+            if app_name and app_name not in ['window', 'app', 'application', 'the', 'this', 'that']:
+                return ('system_control', {'action': 'maximize_window', 'app_name': app_name})
         
         # Focus window / switch to app
         if any(phrase in query_lower for phrase in ['switch to', 'focus on', 'bring up', 'show me']):
@@ -744,6 +757,53 @@ def detect_tool_intent(query: str) -> Optional[tuple[str, dict]]:
                 app_name = match.group(1).strip()
                 if app_name and app_name not in ['window', 'app', 'application']:
                     return ('system_control', {'action': 'focus_window', 'app_name': app_name})
+        
+        # File management - Find file
+        if 'find' in query_lower and 'file' in query_lower:
+            match = re.search(r'find\s+(?:a\s+)?(?:file\s+)?(?:named?\s+)?["\']?([^"\']+)["\']?(?:\s+file)?', query_lower)
+            if match:
+                name = match.group(1).strip()
+                name = re.sub(r'\s+file$', '', name)  # Remove trailing "file"
+                if name and name != 'file':
+                    return ('system_control', {'action': 'find_file', 'name': name})
+        
+        # File management - Find large files
+        if any(phrase in query_lower for phrase in ['large files', 'big files', 'files bigger than', 'files larger than', 'files over']):
+            size_match = re.search(r'(\d+)\s*(gb|mb|kb|g|m|k)', query_lower)
+            if size_match:
+                size = size_match.group(1)
+                unit = size_match.group(2).upper()
+                if unit in ['GB', 'G']:
+                    min_size = f"{size}G"
+                elif unit in ['MB', 'M']:
+                    min_size = f"{size}M"
+                else:
+                    min_size = f"{size}K"
+            else:
+                min_size = "100M"
+            return ('system_control', {'action': 'find_large_files', 'min_size': min_size})
+        
+        # File management - Create file
+        if 'create' in query_lower and 'file' in query_lower:
+            match = re.search(r'create\s+(?:a\s+)?(?:new\s+)?file\s+(?:at\s+|named?\s+)?["\']?([^"\']+)["\']?', query_lower)
+            if match:
+                filepath = match.group(1).strip()
+                return ('system_control', {'action': 'create_file', 'filepath': filepath})
+        
+        # File management - Delete file
+        if any(word in query_lower for word in ['delete', 'remove']) and 'file' in query_lower:
+            match = re.search(r'(?:delete|remove)\s+(?:the\s+)?(?:file\s+)?(?:at\s+)?["\']?([^"\']+)["\']?(?:\s+file)?', query_lower)
+            if match:
+                filepath = match.group(1).strip()
+                filepath = re.sub(r'\s+file$', '', filepath)
+                if filepath and filepath != 'file':
+                    return ('system_control', {'action': 'delete_file', 'filepath': filepath})
+        
+        # File management - Open file manager
+        if any(phrase in query_lower for phrase in ['open file manager', 'open files', 'open folder', 'open directory', 'show files']):
+            path_match = re.search(r'(?:at|in)\s+["\']?([^"\']+)["\']?', query_lower)
+            path = path_match.group(1).strip() if path_match else "~"
+            return ('system_control', {'action': 'open_file_manager', 'path': path})
     
     return None
 
@@ -783,7 +843,11 @@ async def generate_response(
     logger.debug(f"[Timing] Session setup: {time.time() - gen_start:.3f}s")
     
     # Check if user is asking about history/previous commands
-    if any(phrase in user_query.lower() for phrase in ['what did i', 'previous', 'earlier', 'before', 'history', 'recall', 'remember']):
+    # Be specific to avoid matching "play previous video" etc.
+    history_phrases = ['what did i', 'what i said', 'previous command', 'earlier command', 
+                       'before this', 'conversation history', 'recall what', 'remember what',
+                       'what did you say', 'what was my']
+    if any(phrase in user_query.lower() for phrase in history_phrases):
         history = session.get_history()
         if history:
             history_text = "\n".join([f"{turn['role']}: {turn['content']}" for turn in history[-10:]])  # Last 10 turns

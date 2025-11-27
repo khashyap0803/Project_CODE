@@ -416,50 +416,49 @@ class SystemControl:
     # ==================== WINDOW MANAGEMENT ====================
     
     def minimize_window(self, app_name: str = None) -> Dict[str, Any]:
-        """Minimize active window or specific app window"""
+        """Minimize active window or specific app window (case-insensitive)"""
         if app_name:
-            # Try to find window by app name and minimize
-            result = self._run_command(f"wmctrl -c '{app_name}'")  # This closes, not minimize
-            # Use xdotool to minimize by name
-            result = self._run_command(f"xdotool search --name '{app_name}' windowminimize")
-            if result["success"]:
-                return {"success": True, "message": "Minimized"}
+            app_lower = app_name.lower().strip()
+            
+            # Check if window exists
+            check = self._run_command(f"xdotool search --name '{app_lower}'")
+            if not check.get("stdout", "").strip():
+                # Try wmctrl
+                check = self._run_command(f"wmctrl -l | grep -i '{app_lower}'")
+                if not check.get("stdout", "").strip():
+                    return {"success": False, "error": f"No window found matching '{app_name}'"}
+            
+            # Method 1: xdotool search with case-insensitive name and minimize
+            self._run_command(f"xdotool search --name '{app_lower}' windowminimize")
+            return {"success": True, "message": "Minimized"}
         
         # Minimize active window
-        result = self._run_command("xdotool getactivewindow windowminimize")
-        if result["success"]:
-            return {"success": True, "message": "Minimized"}
-        
-        # Fallback: use keyboard shortcut
-        result = self._run_command("xdotool key super+h")
-        if result["success"]:
-            return {"success": True, "message": "Minimized"}
-        
-        return {"success": False, "error": "Could not minimize. Install xdotool."}
+        self._run_command("xdotool getactivewindow windowminimize")
+        return {"success": True, "message": "Minimized"}
     
     def maximize_window(self, app_name: str = None) -> Dict[str, Any]:
-        """Maximize active window or specific app window"""
+        """Maximize active window or specific app window (case-insensitive)"""
         if app_name:
-            result = self._run_command(f"wmctrl -r '{app_name}' -b add,maximized_vert,maximized_horz")
-            if result["success"]:
-                return {"success": True, "message": "Maximized"}
+            app_lower = app_name.lower().strip()
             
-            # Try xdotool
-            result = self._run_command(f"xdotool search --name '{app_name}' windowactivate windowsize 100% 100%")
-            if result["success"]:
-                return {"success": True, "message": "Maximized"}
+            # Check if window exists
+            check = self._run_command(f"xdotool search --name '{app_lower}'")
+            if not check.get("stdout", "").strip():
+                # Try wmctrl
+                check = self._run_command(f"wmctrl -l | grep -i '{app_lower}'")
+                if not check.get("stdout", "").strip():
+                    return {"success": False, "error": f"No window found matching '{app_name}'"}
+            
+            # Activate the window first
+            self._run_command(f"xdotool search --name '{app_lower}' windowactivate")
+            
+            # Now maximize the active window
+            self._run_command("wmctrl -r :ACTIVE: -b add,maximized_vert,maximized_horz")
+            return {"success": True, "message": "Maximized"}
         
         # Maximize active window
-        result = self._run_command("wmctrl -r :ACTIVE: -b add,maximized_vert,maximized_horz")
-        if result["success"]:
-            return {"success": True, "message": "Maximized"}
-        
-        # Fallback: keyboard shortcut
-        result = self._run_command("xdotool key super+Up")
-        if result["success"]:
-            return {"success": True, "message": "Maximized"}
-        
-        return {"success": False, "error": "Could not maximize. Install wmctrl."}
+        self._run_command("wmctrl -r :ACTIVE: -b add,maximized_vert,maximized_horz")
+        return {"success": True, "message": "Maximized"}
     
     def close_window(self, app_name: str = None) -> Dict[str, Any]:
         """Close active window or specific app window"""
@@ -539,13 +538,50 @@ class SystemControl:
             return {"success": False, "error": str(e)}
     
     def close_app(self, app_name: str) -> Dict[str, Any]:
-        """Close an application by name"""
-        result = self._run_command(f"pkill -f '{app_name}'")
-        if result["success"]:
+        """Close an application by name (case-insensitive partial match)"""
+        if not app_name:
+            return {"success": False, "error": "No app name provided"}
+        
+        app_lower = app_name.lower().strip()
+        
+        # Check if any windows match before trying to close
+        check_result = self._run_command(f"xdotool search --name '{app_lower}'")
+        windows_before = check_result.get("stdout", "").strip().split("\n") if check_result.get("stdout") else []
+        windows_before = [w for w in windows_before if w]  # Remove empty strings
+        
+        if not windows_before:
+            # No windows found matching that name, try wmctrl -l with grep
+            check_result = self._run_command(f"wmctrl -l | grep -i '{app_lower}'")
+            if not check_result.get("stdout"):
+                return {"success": False, "error": f"No window found matching '{app_name}'"}
+        
+        # Method 1: Try wmctrl -c directly
+        self._run_command(f"wmctrl -c '{app_name}'")
+        
+        # Method 2: Try xdotool search and close (runs on all matching windows)
+        self._run_command(f"xdotool search --name '{app_lower}' windowclose")
+        
+        # Small delay to allow window to close
+        import time
+        time.sleep(0.3)
+        
+        # Verify the window is actually closed
+        check_result = self._run_command(f"xdotool search --name '{app_lower}'")
+        windows_after = check_result.get("stdout", "").strip().split("\n") if check_result.get("stdout") else []
+        windows_after = [w for w in windows_after if w]
+        
+        if len(windows_after) < len(windows_before):
             return {"success": True, "message": "Closed"}
         
-        result = self._run_command(f"wmctrl -c '{app_name}'")
-        if result["success"]:
+        # Method 3: Try pkill with pattern matching (last resort)
+        self._run_command(f"pkill -fi '{app_lower}'")
+        
+        # Final check
+        time.sleep(0.2)
+        check_result = self._run_command(f"xdotool search --name '{app_lower}'")
+        windows_final = check_result.get("stdout", "").strip() if check_result.get("stdout") else ""
+        
+        if not windows_final:
             return {"success": True, "message": "Closed"}
         
         return {"success": False, "error": f"Could not close {app_name}"}
@@ -599,6 +635,170 @@ class SystemControl:
         if result["success"]:
             return {"success": True, "message": "Notification sent"}
         return {"success": False, "error": "Failed to send notification. Install libnotify."}
+    
+    # ==================== FILE MANAGEMENT ====================
+    
+    def find_file(self, name: str, path: str = "~") -> Dict[str, Any]:
+        """Find files by name"""
+        path = os.path.expanduser(path)
+        result = self._run_command(f"find {path} -name '*{name}*' -type f 2>/dev/null | head -20", timeout=30)
+        if result["success"] and result["stdout"]:
+            files = result["stdout"].strip().split('\n')
+            return {"success": True, "files": files, "message": f"Found {len(files)} file(s)"}
+        return {"success": True, "files": [], "message": "No files found"}
+    
+    def find_large_files(self, min_size: str = "100M", path: str = "~") -> Dict[str, Any]:
+        """Find files larger than specified size (e.g., '100M', '1G', '500K')"""
+        path = os.path.expanduser(path)
+        result = self._run_command(f"find {path} -type f -size +{min_size} -exec ls -lh {{}} \\; 2>/dev/null | head -20", timeout=60)
+        if result["success"] and result["stdout"]:
+            lines = result["stdout"].strip().split('\n')
+            files = []
+            for line in lines:
+                parts = line.split()
+                if len(parts) >= 9:
+                    files.append({"size": parts[4], "path": ' '.join(parts[8:])})
+            return {"success": True, "files": files, "message": f"Found {len(files)} file(s) > {min_size}"}
+        return {"success": True, "files": [], "message": f"No files > {min_size}"}
+    
+    def create_file(self, filepath: str, content: str = "") -> Dict[str, Any]:
+        """Create a new file with optional content"""
+        filepath = os.path.expanduser(filepath)
+        try:
+            # Create parent directories if needed
+            parent_dir = os.path.dirname(filepath)
+            if parent_dir:
+                os.makedirs(parent_dir, exist_ok=True)
+            
+            with open(filepath, 'w') as f:
+                f.write(content)
+            return {"success": True, "message": f"Created {os.path.basename(filepath)}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    def delete_file(self, filepath: str) -> Dict[str, Any]:
+        """Delete a file (moves to trash if possible)"""
+        filepath = os.path.expanduser(filepath)
+        if not os.path.exists(filepath):
+            return {"success": False, "error": "File not found"}
+        
+        # Try to move to trash first (safer)
+        result = self._run_command(f"gio trash '{filepath}'")
+        if result["success"]:
+            return {"success": True, "message": "Moved to trash"}
+        
+        # Fallback: actually delete
+        try:
+            os.remove(filepath)
+            return {"success": True, "message": "Deleted"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    def move_file(self, source: str, destination: str) -> Dict[str, Any]:
+        """Move/rename a file"""
+        source = os.path.expanduser(source)
+        destination = os.path.expanduser(destination)
+        
+        if not os.path.exists(source):
+            return {"success": False, "error": "Source not found"}
+        
+        try:
+            import shutil
+            shutil.move(source, destination)
+            return {"success": True, "message": "Moved"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    def copy_file(self, source: str, destination: str) -> Dict[str, Any]:
+        """Copy a file"""
+        source = os.path.expanduser(source)
+        destination = os.path.expanduser(destination)
+        
+        if not os.path.exists(source):
+            return {"success": False, "error": "Source not found"}
+        
+        try:
+            import shutil
+            if os.path.isdir(source):
+                shutil.copytree(source, destination)
+            else:
+                shutil.copy2(source, destination)
+            return {"success": True, "message": "Copied"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    def get_file_info(self, filepath: str) -> Dict[str, Any]:
+        """Get file information (size, modified date, etc.)"""
+        filepath = os.path.expanduser(filepath)
+        
+        if not os.path.exists(filepath):
+            return {"success": False, "error": "File not found"}
+        
+        try:
+            stat = os.stat(filepath)
+            import datetime
+            size = stat.st_size
+            if size >= 1024*1024*1024:
+                size_str = f"{size/(1024*1024*1024):.1f} GB"
+            elif size >= 1024*1024:
+                size_str = f"{size/(1024*1024):.1f} MB"
+            elif size >= 1024:
+                size_str = f"{size/1024:.1f} KB"
+            else:
+                size_str = f"{size} bytes"
+            
+            modified = datetime.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+            
+            return {
+                "success": True,
+                "path": filepath,
+                "size": size_str,
+                "modified": modified,
+                "is_dir": os.path.isdir(filepath),
+                "message": f"{os.path.basename(filepath)}: {size_str}, modified {modified}"
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    def list_directory(self, path: str = ".") -> Dict[str, Any]:
+        """List contents of a directory"""
+        path = os.path.expanduser(path)
+        
+        if not os.path.exists(path):
+            return {"success": False, "error": "Directory not found"}
+        
+        if not os.path.isdir(path):
+            return {"success": False, "error": "Not a directory"}
+        
+        try:
+            items = []
+            for entry in os.listdir(path):
+                full_path = os.path.join(path, entry)
+                is_dir = os.path.isdir(full_path)
+                items.append({"name": entry, "is_dir": is_dir})
+            
+            return {
+                "success": True,
+                "path": path,
+                "items": items,
+                "message": f"{len(items)} items in {path}"
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    def open_file_manager(self, path: str = "~") -> Dict[str, Any]:
+        """Open file manager at specified path"""
+        path = os.path.expanduser(path)
+        
+        result = self._run_command(f"xdg-open '{path}'")
+        if result["success"]:
+            return {"success": True, "message": "Opened"}
+        
+        result = self._run_command(f"nautilus '{path}'")
+        if result["success"]:
+            return {"success": True, "message": "Opened"}
+        
+        return {"success": False, "error": "Could not open file manager"}
     
     # ==================== GENERAL SYSTEM CONTROL ====================
     
@@ -703,6 +903,26 @@ class SystemControl:
                 kwargs.get('message', ''),
                 kwargs.get('urgency', 'normal')
             )
+        
+        # File management
+        elif action == 'find_file':
+            return self.find_file(kwargs.get('name', ''), kwargs.get('path', '~'))
+        elif action == 'find_large_files':
+            return self.find_large_files(kwargs.get('min_size', '100M'), kwargs.get('path', '~'))
+        elif action == 'create_file':
+            return self.create_file(kwargs.get('filepath', ''), kwargs.get('content', ''))
+        elif action == 'delete_file':
+            return self.delete_file(kwargs.get('filepath', ''))
+        elif action == 'move_file':
+            return self.move_file(kwargs.get('source', ''), kwargs.get('destination', ''))
+        elif action == 'copy_file':
+            return self.copy_file(kwargs.get('source', ''), kwargs.get('destination', ''))
+        elif action == 'file_info':
+            return self.get_file_info(kwargs.get('filepath', ''))
+        elif action == 'list_dir':
+            return self.list_directory(kwargs.get('path', '.'))
+        elif action == 'open_file_manager':
+            return self.open_file_manager(kwargs.get('path', '~'))
         
         else:
             return {"success": False, "error": f"Unknown action: {action}"}
