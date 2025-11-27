@@ -4,10 +4,20 @@ Provides OS-level controls: volume, brightness, screenshots, power management, e
 """
 import subprocess
 import os
+import datetime
+import threading
 from typing import Dict, Any, Optional
 from core.logger import setup_logger
 
 logger = setup_logger(__name__)
+
+# Global storage for timers/reminders
+_active_timers = {}
+_active_reminders = {}
+_active_alarms = {}
+_timer_counter = 0
+_stopwatch_start = None
+_stopwatch_running = False
 
 
 class SystemControl:
@@ -800,6 +810,504 @@ class SystemControl:
         
         return {"success": False, "error": "Could not open file manager"}
     
+    # ==================== TIME AND DATE ====================
+    
+    def get_time(self) -> Dict[str, Any]:
+        """Get current time"""
+        now = datetime.datetime.now()
+        time_str = now.strftime("%I:%M %p")  # 12-hour format with AM/PM
+        return {
+            "success": True, 
+            "time": time_str,
+            "message": f"The current time is {time_str}"
+        }
+    
+    def get_date(self) -> Dict[str, Any]:
+        """Get current date"""
+        now = datetime.datetime.now()
+        date_str = now.strftime("%A, %B %d, %Y")  # "Thursday, November 27, 2025"
+        return {
+            "success": True,
+            "date": date_str,
+            "message": f"Today is {date_str}"
+        }
+    
+    def get_datetime(self) -> Dict[str, Any]:
+        """Get current date and time"""
+        now = datetime.datetime.now()
+        datetime_str = now.strftime("%A, %B %d, %Y at %I:%M %p")
+        return {
+            "success": True,
+            "datetime": datetime_str,
+            "message": f"It is {datetime_str}"
+        }
+    
+    # ==================== TIMERS AND REMINDERS ====================
+    
+    def set_timer(self, seconds: int, name: str = None) -> Dict[str, Any]:
+        """Set a timer for specified seconds"""
+        global _timer_counter, _active_timers
+        
+        _timer_counter += 1
+        timer_id = f"timer_{_timer_counter}"
+        timer_name = name or f"Timer {_timer_counter}"
+        
+        def timer_callback():
+            # Send notification when timer completes
+            self.send_notification("JARVIS Timer", f"{timer_name} completed!", "critical")
+            # Play a sound
+            self._run_command("paplay /usr/share/sounds/freedesktop/stereo/complete.oga 2>/dev/null || paplay /usr/share/sounds/gnome/default/alerts/glass.ogg 2>/dev/null")
+            _active_timers.pop(timer_id, None)
+        
+        timer = threading.Timer(seconds, timer_callback)
+        timer.start()
+        _active_timers[timer_id] = {
+            "name": timer_name,
+            "seconds": seconds,
+            "timer": timer,
+            "started": datetime.datetime.now()
+        }
+        
+        # Format time nicely
+        if seconds >= 3600:
+            time_str = f"{seconds // 3600} hour(s) {(seconds % 3600) // 60} minute(s)"
+        elif seconds >= 60:
+            time_str = f"{seconds // 60} minute(s) {seconds % 60} second(s)"
+        else:
+            time_str = f"{seconds} second(s)"
+        
+        return {
+            "success": True,
+            "timer_id": timer_id,
+            "message": f"Timer set for {time_str}"
+        }
+    
+    def cancel_timer(self, timer_id: str = None) -> Dict[str, Any]:
+        """Cancel a timer"""
+        global _active_timers
+        
+        if timer_id and timer_id in _active_timers:
+            _active_timers[timer_id]["timer"].cancel()
+            name = _active_timers.pop(timer_id)["name"]
+            return {"success": True, "message": f"Cancelled {name}"}
+        elif not timer_id and _active_timers:
+            # Cancel most recent timer
+            timer_id = list(_active_timers.keys())[-1]
+            _active_timers[timer_id]["timer"].cancel()
+            name = _active_timers.pop(timer_id)["name"]
+            return {"success": True, "message": f"Cancelled {name}"}
+        else:
+            return {"success": False, "error": "No active timers"}
+    
+    def list_timers(self) -> Dict[str, Any]:
+        """List all active timers"""
+        global _active_timers
+        
+        if not _active_timers:
+            return {"success": True, "timers": [], "message": "No active timers"}
+        
+        timers = []
+        now = datetime.datetime.now()
+        for tid, info in _active_timers.items():
+            elapsed = (now - info["started"]).seconds
+            remaining = max(0, info["seconds"] - elapsed)
+            timers.append({
+                "id": tid,
+                "name": info["name"],
+                "remaining_seconds": remaining
+            })
+        
+        return {
+            "success": True,
+            "timers": timers,
+            "message": f"{len(timers)} active timer(s)"
+        }
+    
+    def set_reminder(self, message: str, seconds: int) -> Dict[str, Any]:
+        """Set a reminder with a custom message"""
+        global _active_reminders, _timer_counter
+        
+        _timer_counter += 1
+        reminder_id = f"reminder_{_timer_counter}"
+        
+        def reminder_callback():
+            self.send_notification("JARVIS Reminder", message, "critical")
+            self._run_command("paplay /usr/share/sounds/freedesktop/stereo/message.oga 2>/dev/null")
+            _active_reminders.pop(reminder_id, None)
+        
+        timer = threading.Timer(seconds, reminder_callback)
+        timer.start()
+        _active_reminders[reminder_id] = {
+            "message": message,
+            "seconds": seconds,
+            "timer": timer,
+            "started": datetime.datetime.now()
+        }
+        
+        # Format time nicely
+        if seconds >= 3600:
+            time_str = f"{seconds // 3600} hour(s) {(seconds % 3600) // 60} minute(s)"
+        elif seconds >= 60:
+            time_str = f"{seconds // 60} minute(s)"
+        else:
+            time_str = f"{seconds} seconds"
+        
+        return {
+            "success": True,
+            "reminder_id": reminder_id,
+            "message": f"Reminder set for {time_str}"
+        }
+    
+    def cancel_reminder(self, reminder_id: str = None) -> Dict[str, Any]:
+        """Cancel a reminder"""
+        global _active_reminders
+        
+        if reminder_id and reminder_id in _active_reminders:
+            _active_reminders[reminder_id]["timer"].cancel()
+            msg = _active_reminders.pop(reminder_id)["message"]
+            return {"success": True, "message": f"Cancelled reminder: {msg}"}
+        elif not reminder_id and _active_reminders:
+            # Cancel most recent reminder
+            reminder_id = list(_active_reminders.keys())[-1]
+            _active_reminders[reminder_id]["timer"].cancel()
+            msg = _active_reminders.pop(reminder_id)["message"]
+            return {"success": True, "message": f"Cancelled reminder: {msg}"}
+        else:
+            return {"success": False, "error": "No active reminders"}
+    
+    def list_reminders(self) -> Dict[str, Any]:
+        """List all active reminders"""
+        global _active_reminders
+        
+        if not _active_reminders:
+            return {"success": True, "reminders": [], "message": "No active reminders"}
+        
+        reminders = []
+        now = datetime.datetime.now()
+        for rid, info in _active_reminders.items():
+            elapsed = (now - info["started"]).seconds
+            remaining = max(0, info["seconds"] - elapsed)
+            reminders.append({
+                "id": rid,
+                "message": info["message"],
+                "remaining_seconds": remaining
+            })
+        
+        return {
+            "success": True,
+            "reminders": reminders,
+            "message": f"{len(reminders)} active reminder(s)"
+        }
+    
+    # ==================== STOPWATCH ====================
+    
+    def start_stopwatch(self) -> Dict[str, Any]:
+        """Start a stopwatch"""
+        global _stopwatch_start, _stopwatch_running
+        
+        if _stopwatch_running:
+            return {"success": False, "error": "Stopwatch already running"}
+        
+        _stopwatch_start = datetime.datetime.now()
+        _stopwatch_running = True
+        return {"success": True, "message": "Stopwatch started"}
+    
+    def stop_stopwatch(self) -> Dict[str, Any]:
+        """Stop the stopwatch and return elapsed time"""
+        global _stopwatch_start, _stopwatch_running
+        
+        if not _stopwatch_running:
+            return {"success": False, "error": "Stopwatch is not running"}
+        
+        elapsed = datetime.datetime.now() - _stopwatch_start
+        _stopwatch_running = False
+        
+        # Format elapsed time
+        total_seconds = int(elapsed.total_seconds())
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+        
+        if hours > 0:
+            time_str = f"{hours} hour(s) {minutes} minute(s) {seconds} second(s)"
+        elif minutes > 0:
+            time_str = f"{minutes} minute(s) {seconds} second(s)"
+        else:
+            time_str = f"{seconds} second(s)"
+        
+        return {
+            "success": True,
+            "elapsed_seconds": total_seconds,
+            "message": f"Stopwatch stopped. Elapsed time: {time_str}"
+        }
+    
+    def reset_stopwatch(self) -> Dict[str, Any]:
+        """Reset the stopwatch"""
+        global _stopwatch_start, _stopwatch_running
+        
+        _stopwatch_start = None
+        _stopwatch_running = False
+        return {"success": True, "message": "Stopwatch reset"}
+    
+    def get_stopwatch(self) -> Dict[str, Any]:
+        """Get current stopwatch time without stopping"""
+        global _stopwatch_start, _stopwatch_running
+        
+        if not _stopwatch_running or _stopwatch_start is None:
+            return {"success": False, "error": "Stopwatch is not running"}
+        
+        elapsed = datetime.datetime.now() - _stopwatch_start
+        total_seconds = int(elapsed.total_seconds())
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+        
+        if hours > 0:
+            time_str = f"{hours} hour(s) {minutes} minute(s) {seconds} second(s)"
+        elif minutes > 0:
+            time_str = f"{minutes} minute(s) {seconds} second(s)"
+        else:
+            time_str = f"{seconds} second(s)"
+        
+        return {
+            "success": True,
+            "elapsed_seconds": total_seconds,
+            "message": f"Stopwatch running: {time_str}"
+        }
+    
+    # ==================== ALARMS ====================
+    
+    def set_alarm(self, hour: int, minute: int = 0, message: str = "Alarm!") -> Dict[str, Any]:
+        """Set an alarm for a specific time"""
+        global _active_alarms, _timer_counter
+        
+        _timer_counter += 1
+        alarm_id = f"alarm_{_timer_counter}"
+        
+        # Calculate seconds until alarm
+        now = datetime.datetime.now()
+        alarm_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        
+        # If alarm time is in the past, set for tomorrow
+        if alarm_time <= now:
+            alarm_time += datetime.timedelta(days=1)
+        
+        seconds_until = (alarm_time - now).total_seconds()
+        
+        def alarm_callback():
+            self.send_notification("JARVIS Alarm", message, "critical")
+            # Play alarm sound multiple times
+            for _ in range(3):
+                self._run_command("paplay /usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga 2>/dev/null || paplay /usr/share/sounds/gnome/default/alerts/drip.ogg 2>/dev/null")
+            _active_alarms.pop(alarm_id, None)
+        
+        timer = threading.Timer(seconds_until, alarm_callback)
+        timer.start()
+        _active_alarms[alarm_id] = {
+            "time": alarm_time,
+            "message": message,
+            "timer": timer
+        }
+        
+        time_str = alarm_time.strftime("%I:%M %p")
+        return {
+            "success": True,
+            "alarm_id": alarm_id,
+            "message": f"Alarm set for {time_str}"
+        }
+    
+    def cancel_alarm(self, alarm_id: str = None) -> Dict[str, Any]:
+        """Cancel an alarm"""
+        global _active_alarms
+        
+        if alarm_id and alarm_id in _active_alarms:
+            _active_alarms[alarm_id]["timer"].cancel()
+            time_str = _active_alarms.pop(alarm_id)["time"].strftime("%I:%M %p")
+            return {"success": True, "message": f"Cancelled alarm for {time_str}"}
+        elif not alarm_id and _active_alarms:
+            # Cancel most recent alarm
+            alarm_id = list(_active_alarms.keys())[-1]
+            _active_alarms[alarm_id]["timer"].cancel()
+            time_str = _active_alarms.pop(alarm_id)["time"].strftime("%I:%M %p")
+            return {"success": True, "message": f"Cancelled alarm for {time_str}"}
+        else:
+            return {"success": False, "error": "No active alarms"}
+    
+    def list_alarms(self) -> Dict[str, Any]:
+        """List all active alarms"""
+        global _active_alarms
+        
+        if not _active_alarms:
+            return {"success": True, "alarms": [], "message": "No active alarms"}
+        
+        alarms = []
+        for aid, info in _active_alarms.items():
+            alarms.append({
+                "id": aid,
+                "time": info["time"].strftime("%I:%M %p"),
+                "message": info["message"]
+            })
+        
+        return {
+            "success": True,
+            "alarms": alarms,
+            "message": f"{len(alarms)} active alarm(s)"
+        }
+    
+    # ==================== SYSTEM INFORMATION ====================
+    
+    def get_system_info(self) -> Dict[str, Any]:
+        """Get comprehensive system information"""
+        info = {}
+        
+        # CPU info
+        result = self._run_command("grep 'model name' /proc/cpuinfo | head -1 | cut -d':' -f2")
+        if result["success"]:
+            info["cpu_model"] = result["stdout"].strip()
+        
+        # CPU usage
+        result = self._run_command("top -bn1 | grep 'Cpu(s)' | awk '{print $2}' | cut -d'%' -f1")
+        if result["success"]:
+            info["cpu_usage"] = f"{result['stdout'].strip()}%"
+        
+        # Memory info
+        result = self._run_command("free -h | grep Mem | awk '{print $3\"/\"$2}'")
+        if result["success"]:
+            info["memory"] = result["stdout"].strip()
+        
+        # Disk usage
+        result = self._run_command("df -h / | tail -1 | awk '{print $3\"/\"$2\" (\"$5\" used)\"}'")
+        if result["success"]:
+            info["disk"] = result["stdout"].strip()
+        
+        # Uptime
+        result = self._run_command("uptime -p")
+        if result["success"]:
+            info["uptime"] = result["stdout"].strip()
+        
+        return {
+            "success": True,
+            "info": info,
+            "message": f"CPU: {info.get('cpu_usage', 'N/A')}, RAM: {info.get('memory', 'N/A')}, Disk: {info.get('disk', 'N/A')}"
+        }
+    
+    def get_cpu_usage(self) -> Dict[str, Any]:
+        """Get CPU usage percentage"""
+        result = self._run_command("top -bn1 | grep 'Cpu(s)' | awk '{print $2}'")
+        if result["success"]:
+            usage = result["stdout"].strip().replace('%', '')
+            return {
+                "success": True,
+                "cpu_usage": f"{usage}%",
+                "message": f"CPU usage is {usage}%"
+            }
+        return {"success": False, "error": "Could not get CPU usage"}
+    
+    def get_memory_usage(self) -> Dict[str, Any]:
+        """Get memory/RAM usage"""
+        result = self._run_command("free -h | grep Mem")
+        if result["success"]:
+            parts = result["stdout"].split()
+            if len(parts) >= 3:
+                total = parts[1]
+                used = parts[2]
+                return {
+                    "success": True,
+                    "total": total,
+                    "used": used,
+                    "message": f"Memory: {used} used of {total}"
+                }
+        return {"success": False, "error": "Could not get memory usage"}
+    
+    def get_gpu_status(self) -> Dict[str, Any]:
+        """Get GPU status (NVIDIA)"""
+        result = self._run_command("nvidia-smi --query-gpu=name,temperature.gpu,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null")
+        if result["success"] and result["stdout"]:
+            parts = result["stdout"].split(',')
+            if len(parts) >= 5:
+                name = parts[0].strip()
+                temp = parts[1].strip()
+                util = parts[2].strip()
+                mem_used = parts[3].strip()
+                mem_total = parts[4].strip()
+                return {
+                    "success": True,
+                    "gpu_name": name,
+                    "temperature": f"{temp}°C",
+                    "utilization": f"{util}%",
+                    "memory": f"{mem_used}MB / {mem_total}MB",
+                    "message": f"GPU: {util}% usage, {temp}°C, {mem_used}MB/{mem_total}MB"
+                }
+        
+        # Try AMD GPU
+        result = self._run_command("rocm-smi --showtemp --showuse 2>/dev/null | head -5")
+        if result["success"] and result["stdout"]:
+            return {
+                "success": True,
+                "info": result["stdout"],
+                "message": "AMD GPU detected"
+            }
+        
+        return {"success": False, "error": "No GPU info available (install nvidia-smi or rocm-smi)"}
+    
+    def get_battery_status(self) -> Dict[str, Any]:
+        """Get battery status (for laptops)"""
+        result = self._run_command("upower -i /org/freedesktop/UPower/devices/battery_BAT0 2>/dev/null | grep -E 'state|percentage|time'")
+        if result["success"] and result["stdout"]:
+            lines = result["stdout"].strip().split('\n')
+            info = {}
+            for line in lines:
+                if ':' in line:
+                    key, val = line.split(':', 1)
+                    info[key.strip()] = val.strip()
+            return {
+                "success": True,
+                "info": info,
+                "message": f"Battery: {info.get('percentage', 'N/A')} ({info.get('state', 'N/A')})"
+            }
+        return {"success": True, "message": "No battery detected (desktop system)"}
+    
+    def get_disk_usage(self) -> Dict[str, Any]:
+        """Get disk usage"""
+        result = self._run_command("df -h / | tail -1")
+        if result["success"]:
+            parts = result["stdout"].split()
+            if len(parts) >= 5:
+                return {
+                    "success": True,
+                    "total": parts[1],
+                    "used": parts[2],
+                    "available": parts[3],
+                    "percentage": parts[4],
+                    "message": f"Disk: {parts[2]} used of {parts[1]} ({parts[4]})"
+                }
+        return {"success": False, "error": "Could not get disk usage"}
+    
+    def get_network_info(self) -> Dict[str, Any]:
+        """Get network information"""
+        info = {}
+        
+        # Get IP address
+        result = self._run_command("hostname -I | awk '{print $1}'")
+        if result["success"]:
+            info["ip_address"] = result["stdout"].strip()
+        
+        # Get public IP
+        result = self._run_command("curl -s ifconfig.me 2>/dev/null", timeout=5)
+        if result["success"]:
+            info["public_ip"] = result["stdout"].strip()
+        
+        # Get active connection
+        result = self._run_command("nmcli -t -f NAME,TYPE,DEVICE connection show --active | head -1")
+        if result["success"]:
+            info["connection"] = result["stdout"].strip()
+        
+        return {
+            "success": True,
+            "info": info,
+            "message": f"IP: {info.get('ip_address', 'N/A')}"
+        }
+    
     # ==================== GENERAL SYSTEM CONTROL ====================
     
     def execute_control(self, action: str, **kwargs) -> Dict[str, Any]:
@@ -815,11 +1323,73 @@ class SystemControl:
         - bluetooth_on, bluetooth_off
         - copy, paste/get_clipboard
         - notify
+        - get_time, get_date, get_datetime
+        - set_timer, cancel_timer, list_timers
+        - set_reminder
+        - get_system_info, get_cpu_usage, get_memory_usage, get_gpu_status, get_disk_usage
         """
         action = action.lower().strip().replace(' ', '_')
         
+        # Time and date
+        if action in ['get_time', 'time', 'what_time']:
+            return self.get_time()
+        elif action in ['get_date', 'date', 'what_date']:
+            return self.get_date()
+        elif action in ['get_datetime', 'datetime']:
+            return self.get_datetime()
+        
+        # Timers
+        elif action in ['set_timer', 'timer']:
+            return self.set_timer(kwargs.get('seconds', 60), kwargs.get('name'))
+        elif action == 'cancel_timer':
+            return self.cancel_timer(kwargs.get('timer_id'))
+        elif action == 'list_timers':
+            return self.list_timers()
+        
+        # Reminders
+        elif action in ['set_reminder', 'reminder']:
+            return self.set_reminder(kwargs.get('message', 'Reminder'), kwargs.get('seconds', 60))
+        elif action == 'cancel_reminder':
+            return self.cancel_reminder(kwargs.get('reminder_id'))
+        elif action == 'list_reminders':
+            return self.list_reminders()
+        
+        # Stopwatch
+        elif action == 'start_stopwatch':
+            return self.start_stopwatch()
+        elif action == 'stop_stopwatch':
+            return self.stop_stopwatch()
+        elif action == 'reset_stopwatch':
+            return self.reset_stopwatch()
+        elif action == 'get_stopwatch':
+            return self.get_stopwatch()
+        
+        # Alarms
+        elif action == 'set_alarm':
+            return self.set_alarm(kwargs.get('hour', 8), kwargs.get('minute', 0), kwargs.get('message', 'Alarm!'))
+        elif action == 'cancel_alarm':
+            return self.cancel_alarm(kwargs.get('alarm_id'))
+        elif action == 'list_alarms':
+            return self.list_alarms()
+        
+        # System info
+        elif action in ['get_system_info', 'system_info', 'system_status']:
+            return self.get_system_info()
+        elif action in ['get_cpu_usage', 'cpu_usage', 'cpu']:
+            return self.get_cpu_usage()
+        elif action in ['get_memory_usage', 'memory_usage', 'ram', 'memory']:
+            return self.get_memory_usage()
+        elif action in ['get_gpu_status', 'gpu_status', 'gpu']:
+            return self.get_gpu_status()
+        elif action in ['get_battery', 'battery', 'battery_status']:
+            return self.get_battery_status()
+        elif action in ['get_disk_usage', 'disk_usage', 'disk']:
+            return self.get_disk_usage()
+        elif action in ['get_network_info', 'network_info', 'network', 'ip']:
+            return self.get_network_info()
+        
         # Volume controls
-        if action == 'volume_up':
+        elif action == 'volume_up':
             return self.volume_up(kwargs.get('amount', 10))
         elif action == 'volume_down':
             return self.volume_down(kwargs.get('amount', 10))

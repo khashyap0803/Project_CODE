@@ -218,21 +218,34 @@ class BrowserTool:
     
     async def _continuous_ad_monitor(self):
         """Background task to continuously skip ads"""
+        logger.info("Starting continuous ad monitor")
         while self._check_session_valid():
             try:
-                await self._skip_youtube_ads(timeout=2)
-                await asyncio.sleep(3)
-            except:
-                break
+                if self.driver and 'youtube.com' in self.driver.current_url:
+                    skipped = await self._skip_youtube_ads(timeout=2)
+                    if skipped:
+                        logger.info("Ad skipped by continuous monitor")
+                await asyncio.sleep(2)
+            except Exception as e:
+                logger.debug(f"Ad monitor error: {e}")
+                await asyncio.sleep(5)
+        logger.info("Continuous ad monitor stopped")
     
     def _start_ad_monitor(self):
         """Start background ad monitoring"""
         if self._ad_skip_task is None or self._ad_skip_task.done():
             try:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 self._ad_skip_task = loop.create_task(self._continuous_ad_monitor())
-            except:
-                pass
+                logger.info("Ad monitor task started")
+            except RuntimeError:
+                # No running event loop, try get_event_loop
+                try:
+                    loop = asyncio.get_event_loop()
+                    self._ad_skip_task = loop.create_task(self._continuous_ad_monitor())
+                    logger.info("Ad monitor task started (fallback)")
+                except Exception as e:
+                    logger.warning(f"Could not start ad monitor: {e}")
     
     async def youtube_autoplay(self, search_query: str) -> Dict[str, Any]:
         """Search YouTube and autoplay first video with ad skipping"""
@@ -437,61 +450,106 @@ class BrowserTool:
                 return {"success": True, "message": "Skipped" if skipped else "No ad"}
             
             elif action in ['next', 'next_video']:
+                logger.info("Executing next video action")
                 # Skip any current ad first
                 await self._skip_youtube_ads(timeout=3)
                 
-                # Try clicking next button
+                # First, click on the video player to ensure it's focused
+                try:
+                    player = driver.find_element(By.CSS_SELECTOR, "#movie_player")
+                    player.click()
+                    await asyncio.sleep(0.3)
+                except:
+                    pass
+                
+                # Method 1: Try clicking next button
                 try:
                     btn = driver.find_element(By.CSS_SELECTOR, ".ytp-next-button")
                     if btn.is_displayed() and btn.is_enabled():
                         btn.click()
-                        logger.info("Clicked next button")
+                        logger.info("Clicked next button successfully")
+                        await asyncio.sleep(2)
+                        await self._skip_youtube_ads(timeout=10)
+                        self._start_ad_monitor()  # Restart ad monitor
+                        return {"success": True, "message": "Playing next"}
                 except Exception as e:
                     logger.debug(f"Next button click failed: {e}")
-                    # Use keyboard shortcut - Shift+N for next in playlist
-                    driver.find_element(By.TAG_NAME, "body").send_keys(Keys.SHIFT + "n")
                 
-                await asyncio.sleep(2)
-                await self._skip_youtube_ads(timeout=10)
-                return {"success": True, "message": "Playing"}
+                # Method 2: Use keyboard shortcut - Shift+N for next in playlist
+                try:
+                    body = driver.find_element(By.TAG_NAME, "body")
+                    body.send_keys(Keys.SHIFT + "n")
+                    logger.info("Sent Shift+N for next video")
+                    await asyncio.sleep(2)
+                    await self._skip_youtube_ads(timeout=10)
+                    self._start_ad_monitor()
+                    return {"success": True, "message": "Playing next"}
+                except Exception as e:
+                    logger.debug(f"Shift+N failed: {e}")
+                
+                # Method 3: JavaScript click on next button
+                try:
+                    driver.execute_script("document.querySelector('.ytp-next-button').click()")
+                    logger.info("JavaScript clicked next button")
+                    await asyncio.sleep(2)
+                    await self._skip_youtube_ads(timeout=10)
+                    self._start_ad_monitor()
+                    return {"success": True, "message": "Playing next"}
+                except Exception as e:
+                    logger.debug(f"JS next click failed: {e}")
+                
+                return {"success": False, "error": "Could not play next video"}
             
             elif action in ['previous', 'prev', 'previous_video']:
+                logger.info("Executing previous video action")
                 # Skip any current ad first
                 await self._skip_youtube_ads(timeout=3)
                 
-                # Try clicking previous button - YouTube doesn't always have this
+                # First, click on the video player to ensure it's focused
+                try:
+                    player = driver.find_element(By.CSS_SELECTOR, "#movie_player")
+                    player.click()
+                    await asyncio.sleep(0.3)
+                except:
+                    pass
+                
+                # Method 1: Try clicking previous button
                 try:
                     btn = driver.find_element(By.CSS_SELECTOR, ".ytp-prev-button")
                     if btn.is_displayed() and btn.is_enabled():
                         btn.click()
-                        logger.info("Clicked previous button")
+                        logger.info("Clicked previous button successfully")
                         await asyncio.sleep(2)
                         await self._skip_youtube_ads(timeout=10)
-                        return {"success": True, "message": "Playing"}
-                except:
-                    pass
+                        self._start_ad_monitor()
+                        return {"success": True, "message": "Playing previous"}
+                except Exception as e:
+                    logger.debug(f"Previous button not available: {e}")
                 
-                # Fallback: Use keyboard shortcut Shift+P
+                # Method 2: Use keyboard shortcut Shift+P
                 try:
-                    driver.find_element(By.TAG_NAME, "body").send_keys(Keys.SHIFT + "p")
+                    body = driver.find_element(By.TAG_NAME, "body")
+                    body.send_keys(Keys.SHIFT + "p")
+                    logger.info("Sent Shift+P for previous video")
                     await asyncio.sleep(2)
                     await self._skip_youtube_ads(timeout=10)
-                    return {"success": True, "message": "Playing"}
-                except:
-                    pass
+                    self._start_ad_monitor()
+                    return {"success": True, "message": "Playing previous"}
+                except Exception as e:
+                    logger.debug(f"Shift+P failed: {e}")
                 
-                # Final fallback: Click back twice in history (like double-clicking previous)
+                # Method 3: Navigate back in browser history
                 try:
                     driver.back()
-                    await asyncio.sleep(1)
-                    # If we went to search results, that counts as going back
-                    if '/watch' not in driver.current_url:
-                        driver.back()
-                        await asyncio.sleep(1)
+                    logger.info("Navigated back in history")
+                    await asyncio.sleep(2)
                     await self._skip_youtube_ads(timeout=10)
-                    return {"success": True, "message": "Playing"}
-                except:
-                    return {"success": False, "error": "No previous video"}
+                    self._start_ad_monitor()
+                    return {"success": True, "message": "Playing previous"}
+                except Exception as e:
+                    logger.debug(f"Browser back failed: {e}")
+                
+                return {"success": False, "error": "Could not play previous video"}
             
             elif action == 'restart':
                 if video:

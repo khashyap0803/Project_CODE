@@ -49,6 +49,268 @@ except Exception as e:
     SYSTEM_CONTROL_AVAILABLE = False
     logger.warning(f"System control not available: {e}")
 
+# Default session ID for persistent memory across requests
+DEFAULT_SESSION_ID = "jarvis-default-session"
+
+# LLM-based intent classification prompt
+# NOTE: Double braces {{ }} are escaped braces for .format()
+INTENT_CLASSIFICATION_PROMPT = """You are an intent classifier for a voice assistant. Analyze the user's query and classify it into one of these categories.
+
+CATEGORIES:
+1. TIME_DATE - asking for time, date, day, datetime (e.g., "whats the time", "tell me today's date", "wat day is it")
+2. TIMER - setting/canceling timers (e.g., "set 5 sec timer", "timer for 10 minutes", "cancel timer")
+3. ALARM - setting/canceling alarms (e.g., "set alarm for 7am", "wake me up at 8", "cancel alarm")
+4. REMINDER - setting reminders (e.g., "remind me to call mom in 5 minutes", "reminder after 10 sec to drink water")
+5. STOPWATCH - stopwatch controls (e.g., "start stopwatch", "stop the stopwatch", "how long has stopwatch been running")
+6. VOLUME - volume controls (e.g., "volume up", "mute", "set volume to 50")
+7. BRIGHTNESS - brightness controls (e.g., "increase brightness", "dim screen")
+8. LOCK_SCREEN - lock the screen (e.g., "lock screen", "lock my pc", "lock computer")
+9. SCREENSHOT - take screenshot (e.g., "take screenshot", "capture screen")
+10. YOUTUBE_PLAY - play something on YouTube (e.g., "play X on youtube", "youtube X song")
+11. YOUTUBE_CONTROL - control YouTube playback (e.g., "pause video", "next song", "previous video", "resume")
+12. BROWSER_CONTROL - browser operations (e.g., "open browser", "close browser", "new tab", "go to X.com")
+13. OPEN_APP - open an application (e.g., "open calculator", "launch firefox", "start vscode")
+14. CLOSE_APP - close an application (e.g., "close calculator", "exit firefox")
+15. WINDOW_CONTROL - window management (e.g., "maximize calculator", "minimize firefox", "focus vscode")
+16. SYSTEM_INFO - system status queries (e.g., "cpu usage", "check memory", "disk space", "battery status")
+17. CONVERSATION - general conversation/questions (e.g., "who are you", "tell me a joke", "explain quantum physics")
+18. WEB_SEARCH - needs web search (e.g., "latest news about X", "current weather", "who won the election")
+
+Respond with ONLY a JSON object in this exact format:
+{{"category": "CATEGORY_NAME", "params": {{"key": "value"}}}}
+
+For params, extract relevant information:
+- TIME_DATE: {{"type": "time|date|datetime"}}
+- TIMER: {{"seconds": 300, "action": "set|cancel|list"}}
+- ALARM: {{"hour": 7, "minute": 0, "action": "set|cancel|list"}}
+- REMINDER: {{"message": "call mom", "seconds": 300}}
+- STOPWATCH: {{"action": "start|stop|reset|get"}}
+- VOLUME: {{"action": "up|down|mute|unmute|set", "level": 50}}
+- BRIGHTNESS: {{"action": "up|down|set", "level": 50}}
+- YOUTUBE_PLAY: {{"query": "search term"}}
+- YOUTUBE_CONTROL: {{"action": "play|pause|next|previous|mute|unmute|fullscreen"}}
+- BROWSER_CONTROL: {{"action": "open|close|new_tab|goto", "url": "optional"}}
+- OPEN_APP: {{"app": "application name"}}
+- CLOSE_APP: {{"app": "application name"}}
+- WINDOW_CONTROL: {{"action": "maximize|minimize|focus", "app": "application name"}}
+- SYSTEM_INFO: {{"type": "cpu|memory|gpu|battery|disk|network|all"}}
+- CONVERSATION: {{}}
+- WEB_SEARCH: {{}}
+
+User query: "{query}"
+"""
+
+async def llm_classify_intent(query: str) -> Optional[tuple[str, dict]]:
+    """
+    Use LLM to classify user intent when pattern matching is uncertain.
+    Returns (tool_name, parameters) or None for conversation.
+    """
+    import aiohttp
+    import json
+    
+    logger.debug(f"LLM intent classification starting for: {query[:50]}")
+    
+    try:
+        prompt = INTENT_CLASSIFICATION_PROMPT.format(query=query)
+        
+        payload = {
+            "model": settings.LLM_MODEL_NAME,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.1,  # Low temperature for consistent classification
+            "max_tokens": 150,
+            "stream": False
+        }
+        
+        async with aiohttp.ClientSession() as http_session:
+            async with http_session.post(
+                settings.LLM_API_URL,  # Already includes /v1/chat/completions
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=5)  # 5 second timeout
+            ) as response:
+                if response.status != 200:
+                    logger.warning(f"LLM intent classification failed: {response.status}")
+                    return None
+                
+                result = await response.json()
+                content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+                
+                logger.debug(f"LLM intent raw response: {content[:300]}")
+                
+                # Parse JSON response - handle nested braces
+                data = None
+                try:
+                    # Method 1: Find balanced braces
+                    start_idx = content.find('{')
+                    if start_idx >= 0:
+                        brace_count = 0
+                        end_idx = start_idx
+                        for i, c in enumerate(content[start_idx:], start_idx):
+                            if c == '{':
+                                brace_count += 1
+                            elif c == '}':
+                                brace_count -= 1
+                                if brace_count == 0:
+                                    end_idx = i + 1
+                                    break
+                        json_str = content[start_idx:end_idx]
+                        logger.debug(f"Extracted JSON: {json_str}")
+                        data = json.loads(json_str)
+                    else:
+                        logger.debug(f"No JSON found in LLM response")
+                        return None
+                except json.JSONDecodeError as e:
+                    logger.debug(f"JSON parse error: {e}")
+                    return None
+                
+                if data is None or not isinstance(data, dict):
+                    logger.debug(f"Invalid data type: {type(data)}")
+                    return None
+                
+                category = data.get("category", "")
+                if not category:
+                    logger.debug(f"No category in data: {data}")
+                    return None
+                    
+                category = category.upper()
+                params = data.get("params", {})
+                
+                logger.info(f"LLM classified intent: {category} with params: {params}")
+                
+                # Map categories to tool names and parameters
+                if category == "TIME_DATE":
+                    time_type = params.get("type", "time")
+                    if time_type == "date":
+                        return ("system_control", {"action": "get_date"})
+                    elif time_type == "datetime":
+                        return ("system_control", {"action": "get_datetime"})
+                    else:
+                        return ("system_control", {"action": "get_time"})
+                
+                elif category == "TIMER":
+                    action = params.get("action", "set")
+                    if action == "set":
+                        return ("system_control", {"action": "set_timer", "seconds": params.get("seconds", 60)})
+                    elif action == "cancel":
+                        return ("system_control", {"action": "cancel_timer"})
+                    else:
+                        return ("system_control", {"action": "list_timers"})
+                
+                elif category == "ALARM":
+                    action = params.get("action", "set")
+                    if action == "set":
+                        return ("system_control", {"action": "set_alarm", "hour": params.get("hour", 8), "minute": params.get("minute", 0)})
+                    elif action == "cancel":
+                        return ("system_control", {"action": "cancel_alarm"})
+                    else:
+                        return ("system_control", {"action": "list_alarms"})
+                
+                elif category == "REMINDER":
+                    return ("system_control", {"action": "set_reminder", "message": params.get("message", "Reminder"), "seconds": params.get("seconds", 60)})
+                
+                elif category == "STOPWATCH":
+                    action = params.get("action", "start")
+                    return ("system_control", {"action": f"{action}_stopwatch"})
+                
+                elif category == "VOLUME":
+                    action = params.get("action", "up")
+                    if action == "set":
+                        return ("system_control", {"action": "volume_set", "level": params.get("level", 50)})
+                    elif action in ["up", "down"]:
+                        return ("system_control", {"action": f"volume_{action}"})
+                    else:
+                        return ("system_control", {"action": action})
+                
+                elif category == "BRIGHTNESS":
+                    action = params.get("action", "up")
+                    if action == "set":
+                        return ("system_control", {"action": "brightness_set", "level": params.get("level", 50)})
+                    else:
+                        return ("system_control", {"action": f"brightness_{action}"})
+                
+                elif category == "LOCK_SCREEN":
+                    return ("system_control", {"action": "lock"})
+                
+                elif category == "SCREENSHOT":
+                    return ("system_control", {"action": "screenshot"})
+                
+                elif category == "YOUTUBE_PLAY":
+                    search_query = params.get("query", "")
+                    if search_query and BROWSER_AUTOMATION_AVAILABLE:
+                        return ("youtube_autoplay", {"search_query": search_query})
+                    return None
+                
+                elif category == "YOUTUBE_CONTROL":
+                    action = params.get("action", "play")
+                    if BROWSER_AUTOMATION_AVAILABLE:
+                        return ("youtube_control", {"action": action})
+                    return None
+                
+                elif category == "BROWSER_CONTROL":
+                    action = params.get("action", "open")
+                    url = params.get("url")
+                    if BROWSER_AUTOMATION_AVAILABLE:
+                        return ("browser_control", {"action": action, "url": url})
+                    return None
+                
+                elif category == "OPEN_APP":
+                    app = params.get("app", "")
+                    if app:
+                        launch_cmd = resolve_known_application(app) or resolve_generic_application(app)
+                        if launch_cmd:
+                            return ("run_command", {"command": launch_cmd})
+                    return None
+                
+                elif category == "CLOSE_APP":
+                    app = params.get("app", "")
+                    if app:
+                        return ("system_control", {"action": "close_app", "app_name": app})
+                    return None
+                
+                elif category == "WINDOW_CONTROL":
+                    action = params.get("action", "maximize")
+                    app = params.get("app", "")
+                    if app:
+                        return ("system_control", {"action": f"{action}_window", "app_name": app})
+                    return None
+                
+                elif category == "SYSTEM_INFO":
+                    info_type = params.get("type", "all")
+                    if info_type == "cpu":
+                        return ("system_control", {"action": "get_cpu_usage"})
+                    elif info_type == "memory":
+                        return ("system_control", {"action": "get_memory_usage"})
+                    elif info_type == "gpu":
+                        return ("system_control", {"action": "get_gpu_status"})
+                    elif info_type == "battery":
+                        return ("system_control", {"action": "get_battery"})
+                    elif info_type == "disk":
+                        return ("system_control", {"action": "get_disk_usage"})
+                    elif info_type == "network":
+                        return ("system_control", {"action": "get_network_info"})
+                    else:
+                        return ("system_control", {"action": "get_system_info"})
+                
+                elif category == "WEB_SEARCH":
+                    return None  # Let it fall through to web search handling
+                
+                # CONVERSATION or unknown - return None to let LLM handle it
+                return None
+                
+    except asyncio.TimeoutError:
+        logger.warning("LLM intent classification timed out")
+        return None
+    except KeyError as e:
+        logger.warning(f"LLM intent classification KeyError: {e}")
+        return None
+    except json.JSONDecodeError as e:
+        logger.warning(f"LLM intent classification JSON error: {e}")
+        return None
+    except Exception as e:
+        logger.warning(f"LLM intent classification error ({type(e).__name__}): {e}")
+        import traceback
+        logger.debug(traceback.format_exc())
+        return None
+
 # Initialize FastAPI app
 app = FastAPI(
     title="JARVIS Voice Assistant",
@@ -655,6 +917,134 @@ def detect_tool_intent(query: str) -> Optional[tuple[str, dict]]:
     
     # === System Controls ===
     if SYSTEM_CONTROL_AVAILABLE:
+        # Time and Date queries
+        if any(phrase in query_lower for phrase in ['what time', 'what is the time', 'current time', 'tell me the time', 'what\'s the time']):
+            return ('system_control', {'action': 'get_time'})
+        
+        if any(phrase in query_lower for phrase in ['what date', 'what is the date', 'what day', 'today\'s date', 'current date', 'what is today', 'whats the date', 'whats today', 'what\'s the date', 'what\'s today']):
+            return ('system_control', {'action': 'get_date'})
+        
+        # Timer controls - multiple patterns
+        # Pattern 1: "timer for X seconds" or "set timer for X minutes"
+        timer_match = re.search(r'(?:set\s+)?(?:a\s+)?timer\s+(?:for\s+)?(\d+)\s*(second|minute|hour|min|sec|hr)s?', query_lower)
+        if timer_match:
+            amount = int(timer_match.group(1))
+            unit = timer_match.group(2).lower()
+            if unit in ['minute', 'min']:
+                seconds = amount * 60
+            elif unit in ['hour', 'hr']:
+                seconds = amount * 3600
+            else:
+                seconds = amount
+            return ('system_control', {'action': 'set_timer', 'seconds': seconds})
+        
+        # Pattern 2: "5 sec timer" or "set 5 minute timer"
+        timer_match2 = re.search(r'(?:set\s+)?(?:a\s+)?(\d+)\s*(second|minute|hour|min|sec|hr)s?\s+timer', query_lower)
+        if timer_match2:
+            amount = int(timer_match2.group(1))
+            unit = timer_match2.group(2).lower()
+            if unit in ['minute', 'min']:
+                seconds = amount * 60
+            elif unit in ['hour', 'hr']:
+                seconds = amount * 3600
+            else:
+                seconds = amount
+            return ('system_control', {'action': 'set_timer', 'seconds': seconds})
+        
+        if any(phrase in query_lower for phrase in ['cancel timer', 'stop timer', 'cancel the timer']):
+            return ('system_control', {'action': 'cancel_timer'})
+        
+        if any(phrase in query_lower for phrase in ['list timers', 'show timers', 'active timers']):
+            return ('system_control', {'action': 'list_timers'})
+        
+        # Stopwatch controls
+        if any(phrase in query_lower for phrase in ['start stopwatch', 'start the stopwatch', 'begin stopwatch', 'stopwatch start']):
+            return ('system_control', {'action': 'start_stopwatch'})
+        
+        if any(phrase in query_lower for phrase in ['stop stopwatch', 'stop the stopwatch', 'end stopwatch', 'stopwatch stop', 'pause stopwatch']):
+            return ('system_control', {'action': 'stop_stopwatch'})
+        
+        if any(phrase in query_lower for phrase in ['reset stopwatch', 'clear stopwatch', 'restart stopwatch']):
+            return ('system_control', {'action': 'reset_stopwatch'})
+        
+        if any(phrase in query_lower for phrase in ['stopwatch time', 'stopwatch status', 'check stopwatch', 'how long stopwatch']):
+            return ('system_control', {'action': 'get_stopwatch'})
+        
+        # Alarm controls
+        alarm_match = re.search(r'(?:set\s+)?(?:an?\s+)?alarm\s+(?:at\s+|for\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?', query_lower)
+        if alarm_match:
+            hour = int(alarm_match.group(1))
+            minute = int(alarm_match.group(2)) if alarm_match.group(2) else 0
+            period = alarm_match.group(3)
+            if period == 'pm' and hour < 12:
+                hour += 12
+            elif period == 'am' and hour == 12:
+                hour = 0
+            return ('system_control', {'action': 'set_alarm', 'hour': hour, 'minute': minute})
+        
+        if any(phrase in query_lower for phrase in ['cancel alarm', 'stop alarm', 'delete alarm', 'remove alarm']):
+            return ('system_control', {'action': 'cancel_alarm'})
+        
+        if any(phrase in query_lower for phrase in ['list alarms', 'show alarms', 'active alarms', 'my alarms']):
+            return ('system_control', {'action': 'list_alarms'})
+        
+        # Reminder controls - multiple patterns
+        # Pattern 1: "reminder to X in Y seconds"
+        reminder_match = re.search(r'(?:set\s+)?(?:a\s+)?reminder\s+(?:to\s+)?(.+?)\s+in\s+(\d+)\s*(second|minute|hour|min|sec|hr)s?', query_lower)
+        if reminder_match:
+            message = reminder_match.group(1).strip()
+            amount = int(reminder_match.group(2))
+            unit = reminder_match.group(3).lower()
+            if unit in ['minute', 'min']:
+                seconds = amount * 60
+            elif unit in ['hour', 'hr']:
+                seconds = amount * 3600
+            else:
+                seconds = amount
+            return ('system_control', {'action': 'set_reminder', 'message': message, 'seconds': seconds})
+        
+        # Pattern 2: "remind me after X sec to Y" or "remind me in X minutes to Y"
+        reminder_match2 = re.search(r'remind\s+(?:me\s+)?(?:after|in)\s+(\d+)\s*(second|minute|hour|min|sec|hr)s?\s+(?:to\s+)?(.+)', query_lower)
+        if reminder_match2:
+            amount = int(reminder_match2.group(1))
+            unit = reminder_match2.group(2).lower()
+            message = reminder_match2.group(3).strip()
+            if unit in ['minute', 'min']:
+                seconds = amount * 60
+            elif unit in ['hour', 'hr']:
+                seconds = amount * 3600
+            else:
+                seconds = amount
+            return ('system_control', {'action': 'set_reminder', 'message': message, 'seconds': seconds})
+        
+        if any(phrase in query_lower for phrase in ['cancel reminder', 'stop reminder', 'delete reminder', 'remove reminder']):
+            return ('system_control', {'action': 'cancel_reminder'})
+        
+        if any(phrase in query_lower for phrase in ['list reminders', 'show reminders', 'active reminders', 'my reminders']):
+            return ('system_control', {'action': 'list_reminders'})
+        
+        # System info queries
+        if any(phrase in query_lower for phrase in ['system status', 'system info', 'computer status', 'pc status']):
+            return ('system_control', {'action': 'get_system_info'})
+        
+        if any(phrase in query_lower for phrase in ['cpu usage', 'cpu status', 'processor usage', 'check cpu']):
+            return ('system_control', {'action': 'get_cpu_usage'})
+        
+        if any(phrase in query_lower for phrase in ['memory usage', 'ram usage', 'ram status', 'check memory', 'check ram']):
+            return ('system_control', {'action': 'get_memory_usage'})
+        
+        if any(phrase in query_lower for phrase in ['gpu status', 'gpu usage', 'graphics card', 'check gpu', 'nvidia status']):
+            return ('system_control', {'action': 'get_gpu_status'})
+        
+        if any(phrase in query_lower for phrase in ['battery status', 'battery level', 'check battery']):
+            return ('system_control', {'action': 'get_battery'})
+        
+        if any(phrase in query_lower for phrase in ['disk usage', 'disk space', 'storage space', 'check disk', 'hard drive']):
+            return ('system_control', {'action': 'get_disk_usage'})
+        
+        if any(phrase in query_lower for phrase in ['network info', 'ip address', 'my ip', 'network status', 'check network']):
+            return ('system_control', {'action': 'get_network_info'})
+        
         # Volume controls (system)
         if 'volume' in query_lower and 'video' not in query_lower and 'youtube' not in query_lower:
             if any(word in query_lower for word in ['up', 'increase', 'raise', 'higher']):
@@ -691,8 +1081,8 @@ def detect_tool_intent(query: str) -> Optional[tuple[str, dict]]:
         if any(phrase in query_lower for phrase in ['take screenshot', 'take a screenshot', 'capture screen', 'screenshot']):
             return ('system_control', {'action': 'screenshot'})
         
-        # Lock screen
-        if any(phrase in query_lower for phrase in ['lock screen', 'lock the screen', 'lock computer', 'lock my computer']):
+        # Lock screen - expanded patterns
+        if any(phrase in query_lower for phrase in ['lock screen', 'lockscreen', 'lock the screen', 'lock computer', 'lock my computer', 'lock the computer', 'lock pc', 'lock my pc', 'lock the pc', 'lock system']):
             return ('system_control', {'action': 'lock'})
         
         # Sleep/Suspend
@@ -832,7 +1222,9 @@ async def generate_response(
     # Detect query complexity for optimization
     max_tokens, timeout = detect_query_complexity(user_query)
     
-    # Get or create session
+    # Get or create session - use default session if none provided for persistent memory
+    if session_id is None:
+        session_id = DEFAULT_SESSION_ID
     session = session_manager.get_or_create_session(session_id)
     
     # Store language in session context
@@ -842,30 +1234,36 @@ async def generate_response(
     session.add_turn("user", user_query)
     logger.debug(f"[Timing] Session setup: {time.time() - gen_start:.3f}s")
     
-    # Check if user is asking about history/previous commands
+    # Check if user is asking about history/previous commands/memory
     # Be specific to avoid matching "play previous video" etc.
     history_phrases = ['what did i', 'what i said', 'previous command', 'earlier command', 
                        'before this', 'conversation history', 'recall what', 'remember what',
-                       'what did you say', 'what was my']
+                       'what did you say', 'what was my', 'do you remember', 'can you remember',
+                       'our conversation', 'what we talked', 'what have we', 'our previous',
+                       'my last question', 'my previous question', 'earlier conversation']
     if any(phrase in user_query.lower() for phrase in history_phrases):
         history = session.get_history()
-        if history:
-            history_text = "\n".join([f"{turn['role']}: {turn['content']}" for turn in history[-10:]])  # Last 10 turns
+        if history and len(history) > 1:  # More than just the current query
+            history_text = "\n".join([f"{turn['role']}: {turn['content']}" for turn in history[-20:]])  # Last 20 turns
             tool_context = {
                 "role": "user",
                 "content": f"""The user asked: "{user_query}"
 
-Here is the recent conversation history:
+Here is our recent conversation history (last {min(20, len(history))} turns):
 {history_text}
 
-Provide a natural summary of what the user did or asked previously."""
+Provide a natural response based on this conversation history. Summarize what we discussed or help them recall specific information."""
             }
             messages = [
-                {"role": "system", "content": "You are JARVIS. Summarize the conversation history naturally."},
+                {"role": "system", "content": "You are JARVIS, an AI assistant. You have access to the conversation history and can recall what was discussed. Be helpful and specific about past conversations."},
                 tool_context
             ]
-            async for sentence in llm.generate_stream(messages, temperature=0.7, max_tokens=300):
+            async for sentence in llm.generate_stream(messages, temperature=0.7, max_tokens=500):
                 yield sentence
+            return
+        else:
+            # No meaningful history yet
+            yield "We haven't had much conversation yet in this session. Feel free to ask me anything!"
             return
     
     # Check for direct tool intent (pattern matching)
@@ -913,15 +1311,35 @@ Provide a natural summary of what the user did or asked previously."""
             is_success = tool_result.get('success', False)
             result_message = tool_result.get('message', '')
             
+            # Check if this is an INFO query (time, date, system status, etc.) vs ACTION command
+            info_actions = ['get_time', 'get_date', 'get_datetime', 'get_system_status', 
+                           'get_cpu_usage', 'get_gpu_status', 'get_battery_status',
+                           'get_disk_usage', 'get_network_info', 'get_memory_usage',
+                           'system_status', 'cpu_usage', 'gpu_status', 'battery_status',
+                           'disk_usage', 'network_info', 'list_timers', 'list_reminders',
+                           'list_alarms', 'get_stopwatch', 'stop_stopwatch', 'set_timer',
+                           'set_reminder', 'set_alarm', 'start_stopwatch']
+            is_info_query = parameters.get('action', '') in info_actions
+            
             if is_success and tool_name in ['youtube_control', 'browser_control', 'system_control', 'youtube_autoplay']:
-                # For control actions, give extremely brief responses
-                tool_context = {
-                    "role": "user",
-                    "content": f"""User: "{user_query}"
+                if is_info_query:
+                    # For info queries, return the actual information naturally
+                    tool_context = {
+                        "role": "user",
+                        "content": f"""User asked: "{user_query}"
+Result: {result_message}
+
+Respond naturally and briefly with just the requested information. Don't add extra commentary."""
+                    }
+                else:
+                    # For control actions, give extremely brief responses
+                    tool_context = {
+                        "role": "user",
+                        "content": f"""User: "{user_query}"
 Tool result: {result_message}
 
 Reply with ONLY 1-3 words confirming the action. Examples: "Done", "Paused", "Playing", "Volume up", "Opened", "Closed". Do NOT explain further."""
-                }
+                    }
             else:
                 # For other tools or failures, be more descriptive
                 tool_context = {
@@ -942,6 +1360,88 @@ Result: {json.dumps(tool_result, indent=2)}
                 yield sentence
             
             return
+        
+        # Pattern matching didn't find a tool - try LLM-based classification
+        # This handles typos, variations, and natural language commands
+        llm_intent_start = time.time()
+        llm_intent = await llm_classify_intent(user_query)
+        logger.debug(f"[Timing] LLM intent classification: {time.time() - llm_intent_start:.3f}s")
+        
+        if llm_intent:
+            tool_name, parameters = llm_intent
+            logger.info(f"LLM classified tool intent: {tool_name} with params: {parameters}")
+            
+            # Execute the classified intent (same handling as pattern matching)
+            tool_result = None
+            
+            if tool_name == 'youtube_autoplay' and BROWSER_AUTOMATION_AVAILABLE:
+                tool_result = await browser_tool.youtube_autoplay(parameters.get('search_query', ''))
+            elif tool_name == 'youtube_control' and BROWSER_AUTOMATION_AVAILABLE:
+                tool_result = await browser_tool.youtube_control(parameters.get('action', 'play'))
+            elif tool_name == 'browser_control' and BROWSER_AUTOMATION_AVAILABLE:
+                tool_result = await browser_tool.browser_control(
+                    parameters.get('action', 'open'),
+                    parameters.get('url')
+                )
+            elif tool_name == 'system_control' and SYSTEM_CONTROL_AVAILABLE:
+                tool_result = system_control.execute_control(
+                    parameters.get('action', ''),
+                    **{k: v for k, v in parameters.items() if k != 'action'}
+                )
+            elif tool_name == 'run_command':
+                tool_result = run_command(parameters.get('command', ''))
+            else:
+                tool_result = await tool_manager.execute_tool(tool_name, parameters)
+            
+            if tool_result:
+                logger.info(f"LLM-classified tool result: {tool_result}")
+                
+                is_success = tool_result.get('success', False)
+                result_message = tool_result.get('message', '')
+                
+                # Check if info query
+                info_actions = ['get_time', 'get_date', 'get_datetime', 'get_system_status', 
+                               'get_cpu_usage', 'get_gpu_status', 'get_battery_status',
+                               'get_disk_usage', 'get_network_info', 'get_memory_usage',
+                               'list_timers', 'list_reminders', 'list_alarms', 'get_stopwatch',
+                               'stop_stopwatch', 'set_timer', 'set_reminder', 'set_alarm', 'start_stopwatch']
+                is_info_query = parameters.get('action', '') in info_actions
+                
+                if is_success:
+                    if is_info_query:
+                        tool_context = {
+                            "role": "user",
+                            "content": f"""User asked: "{user_query}"
+Result: {result_message}
+
+Respond naturally and briefly with just the requested information."""
+                        }
+                    else:
+                        tool_context = {
+                            "role": "user",
+                            "content": f"""User: "{user_query}"
+Tool result: {result_message}
+
+Reply with ONLY 1-3 words confirming the action."""
+                        }
+                else:
+                    tool_context = {
+                        "role": "user",
+                        "content": f"""User: "{user_query}"
+Result: {json.dumps(tool_result, indent=2)}
+
+Briefly explain what went wrong."""
+                    }
+                
+                messages = [
+                    {"role": "system", "content": "You are JARVIS. Be extremely brief."},
+                    tool_context
+                ]
+                
+                async for sentence in llm.generate_stream(messages, temperature=0.3, max_tokens=100):
+                    yield sentence
+                
+                return
     
     # Check if web search is needed
     search_context = None

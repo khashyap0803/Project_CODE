@@ -7,6 +7,7 @@ A powerful, privacy-focused voice assistant with real-time streaming, tool integ
 ### Core Capabilities
 - **🎤 Real-Time Voice Streaming**: Hear responses as they're generated (< 2s latency)
 - **🤖 Intelligent Tool System**: Browser automation, file operations, system control
+- **🧠 LLM Intent Classification**: Understands commands even with typos/natural variations
 - **🌍 Multi-Language Support**: English (Piper TTS), Telugu/Hindi (gTTS fallback)
 - **🔍 Web Search**: Powered by Perplexity AI for current information
 - **🧠 200-Turn Memory**: Persistent conversation context across sessions
@@ -16,8 +17,9 @@ A powerful, privacy-focused voice assistant with real-time streaming, tool integ
 ### Agent Capabilities (v3.0)
 - **Browser Automation** (Selenium): YouTube autoplay, Google search, URL navigation
 - **System Control**: Launch applications (VS Code, Terminal, Arduino IDE, etc.)
+- **Time Management**: Timers, alarms, stopwatch, reminders
 - **File Operations**: Read, write, search files
-- **System Monitoring**: CPU, RAM, disk usage
+- **System Monitoring**: CPU, RAM, disk, GPU, network usage
 - **Command Execution**: Run shell commands safely (30s timeout)
 
 ## 🚀 Quick Start
@@ -78,12 +80,34 @@ python3 server.py
 
 ### Voice Commands
 
+**Time & Date:**
+```
+"what time is it" / "wat time" / "tell me the time"
+"what's the date today" / "whats the date"
+```
+
+**Timers, Alarms & Stopwatch:**
+```
+"set a 5 minute timer"
+"set alarm for 7:30am"
+"start stopwatch" / "stop stopwatch" / "reset stopwatch"
+"remind me to take medicine in 1 hour"
+```
+
 **System Control:**
 ```
 "open terminal"
 "open system settings"
 "open VS Code"
 "open Arduino IDE"
+"lock screen" / "lokc screen" (typos work!)
+```
+
+**Volume & Brightness:**
+```
+"volume up" / "increase volume"
+"mute" / "unmute"
+"brightness 50%"
 ```
 
 **Browser Automation:**
@@ -91,6 +115,15 @@ python3 server.py
 "open google and search for Python tutorials"
 "play Kaantha song in YouTube"  # Auto-plays first video!
 "open youtube.com"
+"pause" / "play" / "next video" / "previous"
+```
+
+**System Information:**
+```
+"check cpu status"
+"how much memory is being used"
+"check disk space"
+"what's the gpu temperature"
 ```
 
 **File Operations:**
@@ -98,12 +131,6 @@ python3 server.py
 "read file config.txt"
 "create file test.py with print hello world"
 "list files"
-```
-
-**System Information:**
-```
-"check system status"
-"what did I ask before"  # Recalls conversation history
 ```
 
 **Web Search:**
@@ -158,9 +185,10 @@ Use text-to-voice mode: `./jarvis.py --text`
 - [x] Phase 1: Real-time streaming (<2s latency)
 - [x] Phase 2: Tool integration & browser automation  
 - [x] Phase 2.5: Production startup system & permanent fixes
-- [ ] Phase 3: Telugu/Hindi streaming TTS
-- [ ] Phase 4: Endpoint refactoring
-- [ ] Phase 5: Complete documentation
+- [x] Phase 3: LLM intent classification for typo handling
+- [ ] Phase 4: Telugu/Hindi streaming TTS
+- [ ] Phase 5: Endpoint refactoring
+- [ ] Phase 6: Complete documentation
 
 ## 📄 Documentation
 

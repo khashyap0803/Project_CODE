@@ -2,6 +2,49 @@
 
 All notable changes to the JARVIS Voice Assistant project are documented in this file.
 
+## [3.0.0-v6] - 2025-11-27
+
+### 🧠 LLM Intent Classification & Enhanced Commands Release
+
+#### Intelligent Intent Classification (NEW)
+- **LLM-powered command recognition:**
+  - Pattern matching first (~0.001s) for exact commands
+  - LLM fallback (~0.6-1s) for typos and natural variations
+  - 18 intent categories: TIME_DATE, TIMER, ALARM, REMINDER, STOPWATCH, VOLUME, BRIGHTNESS, LOCK_SCREEN, SCREENSHOT, YOUTUBE_PLAY, YOUTUBE_CONTROL, BROWSER_CONTROL, OPEN_APP, CLOSE_APP, WINDOW_CONTROL, SYSTEM_INFO, CONVERSATION, WEB_SEARCH
+  - Handles typos like "wat time", "lokc screen", "plai utube"
+  - Returns structured classification with confidence scores
+
+#### Stopwatch Functions (NEW)
+- **Full stopwatch support:**
+  - `start_stopwatch()` - Start tracking time
+  - `stop_stopwatch()` - Stop and get elapsed time
+  - `reset_stopwatch()` - Reset to zero
+  - `get_stopwatch()` - Check elapsed without stopping
+  - Formatted output: "X hours, Y minutes, Z seconds"
+
+#### Alarm Functions (NEW)
+- **Complete alarm system:**
+  - `set_alarm(time_str)` - Set alarm for specific time (e.g., "3:30pm", "15:30")
+  - `cancel_alarm(alarm_id)` - Cancel specific alarm
+  - `list_alarms()` - Show all active alarms
+  - System notification + audio alert when triggered
+  - Supports 12-hour (am/pm) and 24-hour formats
+
+#### Fixed Response Issues
+- **Time/Date now returns actual values:**
+  - "What time is it" → "04:14 PM" (not "Done")
+  - "What's the date" → "November 27, 2025"
+  - Added `info_actions` list for non-tool responses
+
+#### Enhanced Detection Patterns
+- **More flexible command recognition:**
+  - "whats the date" (no apostrophe) now works
+  - "set 10 second timer" format supported
+  - "lockscreen" (one word) detection added
+  - Timer/reminder/alarm patterns improved
+
+---
+
 ## [3.0.0-v5] - 2025-11-27
 
 ### 🚀 Native Browser & Polished Controls Release
