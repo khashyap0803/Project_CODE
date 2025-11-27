@@ -42,6 +42,7 @@ psutil==5.9.8
 
 # TTS Libraries
 gtts==2.5.1
+edge-tts>=6.1.0  # Microsoft Edge TTS - streaming Hindi/Telugu
 
 # Development
 pytest==7.4.4

@@ -8,7 +8,8 @@ A powerful, privacy-focused voice assistant with real-time streaming, tool integ
 - **🎤 Real-Time Voice Streaming**: Hear responses as they're generated (< 2s latency)
 - **🤖 Intelligent Tool System**: Browser automation, file operations, system control
 - **🧠 LLM Intent Classification**: Understands commands even with typos/natural variations
-- **🌍 Multi-Language Support**: English (Piper TTS), Telugu/Hindi (gTTS fallback)
+- **🎯 Multi-Command Execution**: Execute chained commands with delays ("open X and after 5 sec maximize it")
+- **🌍 Multi-Language Streaming TTS**: English (Piper), Telugu/Hindi (Edge TTS with true streaming)
 - **🔍 Web Search**: Powered by Perplexity AI for current information
 - **🧠 200-Turn Memory**: Persistent conversation context across sessions
 - **⚡ GPU Acceleration**: CUDA-powered Whisper STT + Mistral LLM
@@ -186,7 +187,8 @@ Use text-to-voice mode: `./jarvis.py --text`
 - [x] Phase 2: Tool integration & browser automation  
 - [x] Phase 2.5: Production startup system & permanent fixes
 - [x] Phase 3: LLM intent classification for typo handling
-- [ ] Phase 4: Telugu/Hindi streaming TTS
+- [x] Phase 3.5: Multi-command execution with delays
+- [x] Phase 4: Telugu/Hindi streaming TTS (Edge TTS)
 - [ ] Phase 5: Endpoint refactoring
 - [ ] Phase 6: Complete documentation
 

@@ -100,6 +100,71 @@ For params, extract relevant information:
 User query: "{query}"
 """
 
+# Multi-command classification prompt for sequential/chained commands
+MULTI_COMMAND_CLASSIFICATION_PROMPT = """You are a command parser for a voice assistant. The user may give MULTIPLE commands in a single sentence.
+
+Your job is to:
+1. Detect if there are multiple commands
+2. Extract each command with any timing/delay information
+3. Return them in execution order
+
+TIMING KEYWORDS to watch for:
+- "after X seconds/minutes" - delay before this command
+- "then" - execute next command after previous completes
+- "and" - can mean simultaneous or sequential
+- "wait X seconds" - explicit delay
+- "in X seconds/minutes" - delay before command
+
+CATEGORIES with param examples:
+1. TIME_DATE - time/date queries: {{"type": "time"}} or {{"type": "date"}} or {{"type": "datetime"}}
+2. TIMER - set timers: {{"action": "set", "seconds": 60}}
+3. ALARM - set alarms: {{"action": "set", "hour": 8, "minute": 0}}
+4. REMINDER - set reminders: {{"message": "call mom", "seconds": 300}}
+5. STOPWATCH - control: {{"action": "start|stop|reset|get"}}
+6. VOLUME - volume control: {{"action": "up|down|mute|set", "level": 50}}
+7. BRIGHTNESS - screen brightness: {{"action": "up|down|set", "level": 50}}
+8. LOCK_SCREEN - lock computer: {{}}
+9. SCREENSHOT - take screenshot: {{}}
+10. YOUTUBE_PLAY - play on youtube: {{"query": "song name"}}
+11. YOUTUBE_CONTROL - media control: {{"action": "pause|play|next|previous"}}
+12. BROWSER_CONTROL - browser: {{"action": "open|close|goto", "url": "optional"}}
+13. OPEN_APP - open app: {{"app": "calculator"}}
+14. CLOSE_APP - close app: {{"app": "firefox"}}
+15. WINDOW_CONTROL - window: {{"action": "maximize|minimize|focus", "app": "calculator"}}
+16. SYSTEM_INFO - system status (CPU, memory, disk, gpu, battery): {{"type": "cpu|memory|disk|gpu|battery|all"}}
+17. CONVERSATION - general chat: {{}}
+18. WEB_SEARCH - needs internet: {{}}
+
+IMPORTANT DISTINCTIONS:
+- "what time is it" → TIME_DATE with type="time" (NOT SYSTEM_INFO)
+- "what date is today" → TIME_DATE with type="date" (NOT SYSTEM_INFO)
+- "check cpu usage" → SYSTEM_INFO with type="cpu"
+- "check memory" → SYSTEM_INFO with type="memory"
+
+Respond with ONLY a JSON object:
+{{
+  "is_multi_command": true/false,
+  "commands": [
+    {{
+      "order": 1,
+      "delay_seconds": 0,
+      "category": "CATEGORY_NAME",
+      "params": {{}},
+      "original_text": "the part of query for this command"
+    }}
+  ]
+}}
+
+EXAMPLES:
+- "what time is it and what is the date" → 2 commands: TIME_DATE(type=time), TIME_DATE(type=date)
+- "open calculator and after 5 seconds maximize it" → 2 commands: OPEN_APP(calculator), then 5sec delay, WINDOW_CONTROL(maximize, calculator)
+- "play kaantha song after 10 seconds" → is_multi_command=false (single command with delay handled differently)
+- "set volume to 50 and open firefox" → 2 commands: VOLUME(set 50), OPEN_APP(firefox)
+- "what time is it" → is_multi_command=false (single command)
+
+User query: "{query}"
+"""
+
 async def llm_classify_intent(query: str) -> Optional[tuple[str, dict]]:
     """
     Use LLM to classify user intent when pattern matching is uncertain.
@@ -310,6 +375,368 @@ async def llm_classify_intent(query: str) -> Optional[tuple[str, dict]]:
         import traceback
         logger.debug(traceback.format_exc())
         return None
+
+
+def is_multi_command_query(query: str) -> bool:
+    """
+    Quick check if a query might contain multiple commands.
+    Uses simple pattern matching before calling the LLM.
+    """
+    query_lower = query.lower()
+    
+    # Multi-command indicators
+    multi_indicators = [
+        ' and ',           # "open X and then Y"
+        ' then ',          # "do X then Y"
+        ' after ',         # "do X after 5 seconds"
+        ' wait ',          # "do X wait 3 sec do Y"
+        ' in ',            # "play X in 10 seconds" (but avoid "play X in youtube")
+        ' followed by ',   # "X followed by Y"
+        ', then',          # "open X, then Y"
+    ]
+    
+    # Check for timing patterns that suggest delays
+    import re
+    timing_patterns = [
+        r'after\s+\d+\s*(sec|second|min|minute)',
+        r'in\s+\d+\s*(sec|second|min|minute)',
+        r'wait\s+\d+\s*(sec|second|min|minute)',
+        r'\d+\s*(sec|second|min|minute)\s+later',
+    ]
+    
+    for indicator in multi_indicators:
+        if indicator in query_lower:
+            # Exclude "in youtube", "in browser" etc.
+            if indicator == ' in ' and any(x in query_lower for x in ['in youtube', 'in browser', 'in firefox', 'in chrome']):
+                continue
+            return True
+    
+    for pattern in timing_patterns:
+        if re.search(pattern, query_lower):
+            return True
+    
+    return False
+
+
+async def llm_parse_multi_command(query: str) -> Optional[list[dict]]:
+    """
+    Use LLM to parse multiple commands from a single query.
+    Returns list of command dicts with order, delay, category, and params.
+    """
+    import aiohttp
+    
+    logger.info(f"Multi-command parsing for: {query}")
+    
+    try:
+        prompt = MULTI_COMMAND_CLASSIFICATION_PROMPT.format(query=query)
+        
+        payload = {
+            "model": settings.LLM_MODEL_NAME,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.1,
+            "max_tokens": 500,
+            "stream": False
+        }
+        
+        async with aiohttp.ClientSession() as http_session:
+            async with http_session.post(
+                settings.LLM_API_URL,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as response:
+                if response.status != 200:
+                    logger.warning(f"Multi-command parsing failed: {response.status}")
+                    return None
+                
+                result = await response.json()
+                content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+                
+                logger.debug(f"Multi-command raw response: {content[:500]}")
+                
+                # Parse JSON response
+                data = None
+                try:
+                    start_idx = content.find('{')
+                    if start_idx >= 0:
+                        brace_count = 0
+                        end_idx = start_idx
+                        for i, c in enumerate(content[start_idx:], start_idx):
+                            if c == '{':
+                                brace_count += 1
+                            elif c == '}':
+                                brace_count -= 1
+                                if brace_count == 0:
+                                    end_idx = i + 1
+                                    break
+                        json_str = content[start_idx:end_idx]
+                        data = json.loads(json_str)
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Multi-command JSON parse error: {e}")
+                    return None
+                
+                if not data or not isinstance(data, dict):
+                    return None
+                
+                is_multi = data.get("is_multi_command", False)
+                commands = data.get("commands", [])
+                
+                if not is_multi or not commands or len(commands) < 1:
+                    logger.debug("Not a multi-command query or no commands parsed")
+                    return None
+                
+                logger.info(f"Parsed {len(commands)} commands from query")
+                return commands
+                
+    except asyncio.TimeoutError:
+        logger.warning("Multi-command parsing timed out")
+        return None
+    except Exception as e:
+        logger.warning(f"Multi-command parsing error: {e}")
+        return None
+
+
+def map_category_to_tool(category: str, params: dict) -> Optional[tuple[str, dict]]:
+    """
+    Map a category name and params to tool_name and parameters.
+    This is a helper to reuse the mapping logic for multi-commands.
+    """
+    category = category.upper()
+    
+    if category == "TIME_DATE":
+        time_type = params.get("type", "time")
+        if time_type == "date":
+            return ("system_control", {"action": "get_date"})
+        elif time_type == "datetime":
+            return ("system_control", {"action": "get_datetime"})
+        else:
+            return ("system_control", {"action": "get_time"})
+    
+    elif category == "TIMER":
+        action = params.get("action", "set")
+        if action == "set":
+            return ("system_control", {"action": "set_timer", "seconds": params.get("seconds", 60)})
+        elif action == "cancel":
+            return ("system_control", {"action": "cancel_timer"})
+        else:
+            return ("system_control", {"action": "list_timers"})
+    
+    elif category == "ALARM":
+        action = params.get("action", "set")
+        if action == "set":
+            return ("system_control", {"action": "set_alarm", "hour": params.get("hour", 8), "minute": params.get("minute", 0)})
+        elif action == "cancel":
+            return ("system_control", {"action": "cancel_alarm"})
+        else:
+            return ("system_control", {"action": "list_alarms"})
+    
+    elif category == "REMINDER":
+        return ("system_control", {"action": "set_reminder", "message": params.get("message", "Reminder"), "seconds": params.get("seconds", 60)})
+    
+    elif category == "STOPWATCH":
+        action = params.get("action", "start")
+        return ("system_control", {"action": f"{action}_stopwatch"})
+    
+    elif category == "VOLUME":
+        action = params.get("action", "up")
+        if action == "set":
+            return ("system_control", {"action": "volume_set", "level": params.get("level", 50)})
+        elif action in ["up", "down"]:
+            return ("system_control", {"action": f"volume_{action}"})
+        else:
+            return ("system_control", {"action": action})
+    
+    elif category == "BRIGHTNESS":
+        action = params.get("action", "up")
+        if action == "set":
+            return ("system_control", {"action": "brightness_set", "level": params.get("level", 50)})
+        else:
+            return ("system_control", {"action": f"brightness_{action}"})
+    
+    elif category == "LOCK_SCREEN":
+        return ("system_control", {"action": "lock"})
+    
+    elif category == "SCREENSHOT":
+        return ("system_control", {"action": "screenshot"})
+    
+    elif category == "YOUTUBE_PLAY":
+        search_query = params.get("query", "")
+        if search_query and BROWSER_AUTOMATION_AVAILABLE:
+            return ("youtube_autoplay", {"search_query": search_query})
+        return None
+    
+    elif category == "YOUTUBE_CONTROL":
+        action = params.get("action", "play")
+        if BROWSER_AUTOMATION_AVAILABLE:
+            return ("youtube_control", {"action": action})
+        return None
+    
+    elif category == "BROWSER_CONTROL":
+        action = params.get("action", "open")
+        url = params.get("url")
+        if BROWSER_AUTOMATION_AVAILABLE:
+            return ("browser_control", {"action": action, "url": url})
+        return None
+    
+    elif category == "OPEN_APP":
+        # Handle both "app" and "app_name" variants from LLM
+        app = params.get("app", "") or params.get("app_name", "")
+        if app:
+            launch_cmd = resolve_known_application(app) or resolve_generic_application(app)
+            if launch_cmd:
+                return ("run_command", {"command": launch_cmd})
+        return None
+    
+    elif category == "CLOSE_APP":
+        # Handle both "app" and "app_name" variants from LLM
+        app = params.get("app", "") or params.get("app_name", "")
+        if app:
+            return ("system_control", {"action": "close_app", "app_name": app})
+        return None
+    
+    elif category == "WINDOW_CONTROL":
+        action = params.get("action", "maximize")
+        # Handle both "app" and "app_name" variants from LLM
+        app = params.get("app", "") or params.get("app_name", "")
+        if app:
+            return ("system_control", {"action": f"{action}_window", "app_name": app})
+        return None
+    
+    elif category == "SYSTEM_INFO":
+        info_type = params.get("type", "all")
+        if info_type == "cpu":
+            return ("system_control", {"action": "get_cpu_usage"})
+        elif info_type == "memory":
+            return ("system_control", {"action": "get_memory_usage"})
+        elif info_type == "gpu":
+            return ("system_control", {"action": "get_gpu_status"})
+        elif info_type == "battery":
+            return ("system_control", {"action": "get_battery"})
+        elif info_type == "disk":
+            return ("system_control", {"action": "get_disk_usage"})
+        elif info_type == "network":
+            return ("system_control", {"action": "get_network_info"})
+        else:
+            return ("system_control", {"action": "get_system_info"})
+    
+    return None
+
+
+async def execute_single_command(tool_name: str, parameters: dict) -> dict:
+    """
+    Execute a single command and return the result.
+    This is a helper for multi-command execution.
+    """
+    tool_result = None
+    
+    try:
+        if tool_name == 'youtube_autoplay' and BROWSER_AUTOMATION_AVAILABLE:
+            tool_result = await browser_tool.youtube_autoplay(parameters.get('search_query', ''))
+        elif tool_name == 'youtube_control' and BROWSER_AUTOMATION_AVAILABLE:
+            tool_result = await browser_tool.youtube_control(parameters.get('action', 'play'))
+        elif tool_name == 'browser_control' and BROWSER_AUTOMATION_AVAILABLE:
+            tool_result = await browser_tool.browser_control(
+                parameters.get('action', 'open'),
+                parameters.get('url')
+            )
+        elif tool_name == 'system_control' and SYSTEM_CONTROL_AVAILABLE:
+            tool_result = system_control.execute_control(
+                parameters.get('action', ''),
+                **{k: v for k, v in parameters.items() if k != 'action'}
+            )
+        elif tool_name == 'run_command':
+            tool_result = run_command(parameters.get('command', ''))
+        else:
+            tool_result = await tool_manager.execute_tool(tool_name, parameters)
+        
+        return tool_result or {"success": False, "message": "No result"}
+    except Exception as e:
+        logger.error(f"Command execution error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+async def execute_multi_commands(commands: list[dict]):
+    """
+    Execute multiple commands sequentially with delays.
+    Yields status messages as execution progresses.
+    """
+    total_commands = len(commands)
+    results = []
+    
+    # Sort commands by order
+    sorted_commands = sorted(commands, key=lambda x: x.get("order", 1))
+    
+    # Track info results to combine at end
+    info_results = []
+    
+    for i, cmd in enumerate(sorted_commands):
+        order = cmd.get("order", i + 1)
+        delay = cmd.get("delay_seconds", 0)
+        category = cmd.get("category", "")
+        params = cmd.get("params", {})
+        original_text = cmd.get("original_text", "")
+        
+        # Apply delay if specified
+        if delay > 0:
+            logger.info(f"Waiting {delay} seconds before command {order}")
+            yield f"Waiting {delay} seconds..."
+            await asyncio.sleep(delay)
+        
+        # Map category to tool
+        tool_info = map_category_to_tool(category, params)
+        
+        if tool_info:
+            tool_name, tool_params = tool_info
+            logger.info(f"Executing command {order}/{total_commands}: {tool_name} with {tool_params}")
+            
+            # Execute the command
+            result = await execute_single_command(tool_name, tool_params)
+            results.append({
+                "order": order,
+                "category": category,
+                "success": result.get("success", False),
+                "message": result.get("message", "")
+            })
+            
+            # Check if this is an info query vs action command
+            info_categories = ['TIME_DATE', 'SYSTEM_INFO']
+            info_actions = ['get_time', 'get_date', 'get_datetime', 'get_cpu_usage', 
+                           'get_memory_usage', 'get_gpu_status', 'get_battery', 
+                           'get_disk_usage', 'get_network_info', 'get_system_info',
+                           'list_timers', 'list_alarms', 'get_stopwatch', 'stop_stopwatch']
+            
+            is_info_query = (category.upper() in info_categories or 
+                            tool_params.get('action', '') in info_actions)
+            
+            # Yield appropriate status
+            if result.get("success"):
+                status = result.get("message", "Done")
+                if is_info_query:
+                    # For info queries, include the result in the response
+                    info_results.append(status)
+                    yield status
+                else:
+                    # For action commands, keep brief
+                    if len(status) > 50:
+                        status = "Done"
+                    yield status
+            else:
+                yield f"Failed: {result.get('message', 'Unknown error')}"
+        else:
+            logger.warning(f"Could not map category {category} to tool")
+            results.append({
+                "order": order,
+                "category": category,
+                "success": False,
+                "message": f"Unknown category: {category}"
+            })
+            yield f"Skipped unknown command: {original_text}"
+    
+    # Final summary
+    successful = sum(1 for r in results if r.get("success"))
+    if successful == total_commands:
+        yield f"All {total_commands} commands completed."
+    else:
+        yield f"Completed {successful}/{total_commands} commands."
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -1268,6 +1695,25 @@ Provide a natural response based on this conversation history. Summarize what we
     
     # Check for direct tool intent (pattern matching)
     if enable_tools:
+        # MULTI-COMMAND CHECK: Check if this is a multi-command query first
+        if is_multi_command_query(user_query):
+            multi_check_start = time.time()
+            logger.info(f"Detected potential multi-command query: {user_query[:100]}")
+            
+            multi_commands = await llm_parse_multi_command(user_query)
+            logger.debug(f"[Timing] Multi-command parsing: {time.time() - multi_check_start:.3f}s")
+            
+            if multi_commands and len(multi_commands) > 0:
+                logger.info(f"Executing {len(multi_commands)} commands sequentially")
+                
+                # Execute commands and yield status updates
+                async for status in execute_multi_commands(multi_commands):
+                    yield status
+                
+                return
+            else:
+                logger.debug("Multi-command parsing returned no commands, falling through to single command")
+        
         tool_check_start = time.time()
         tool_intent = detect_tool_intent(user_query)
         logger.debug(f"[Timing] Tool detection: {time.time() - tool_check_start:.3f}s")

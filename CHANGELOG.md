@@ -2,6 +2,42 @@
 
 All notable changes to the JARVIS Voice Assistant project are documented in this file.
 
+## [3.0.0-v7] - 2025-11-27
+
+### 🎯 Multi-Command Execution & Streaming Indian TTS Release
+
+#### Multi-Command Execution (NEW)
+- **Execute multiple commands in a single sentence:**
+  - "open calculator and after 3 seconds maximize it"
+  - "set volume to 70 then play lofi music on youtube"
+  - "what time is it and also tell me the date"
+  - "check cpu and memory and disk space"
+- **Timing support:**
+  - "after X seconds" - delay before command
+  - "then" - sequential execution
+  - "and" - parallel or sequential commands
+- **LLM-powered parsing:**
+  - Extracts multiple commands with order and delays
+  - Maps categories to tool functions
+  - Returns combined status for all commands
+
+#### Streaming Telugu/Hindi TTS (NEW - Phase 3)
+- **Edge TTS integration for Indian languages:**
+  - TRUE streaming support (not batch download)
+  - Hindi voice: `hi-IN-MadhurNeural` (natural male voice)
+  - Telugu voice: `te-IN-MohanNeural` (natural male voice)
+  - Female alternatives available: `hi-IN-SwaraNeural`, `te-IN-ShrutiNeural`
+- **Low latency:**
+  - Audio chunks stream in real-time (~720 bytes per chunk)
+  - No waiting for full synthesis before playback
+- **Fallback chain:**
+  - Edge TTS → gTTS → English Piper
+
+#### Updated Requirements
+- Added `edge-tts>=6.1.0` for streaming Indian language TTS
+
+---
+
 ## [3.0.0-v6] - 2025-11-27
 
 ### 🧠 LLM Intent Classification & Enhanced Commands Release
