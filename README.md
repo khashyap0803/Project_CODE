@@ -9,7 +9,10 @@ A powerful, privacy-focused voice assistant with real-time streaming, tool integ
 - **🤖 Intelligent Tool System**: Browser automation, file operations, system control
 - **🧠 LLM Intent Classification**: Understands commands even with typos/natural variations
 - **🎯 Multi-Command Execution**: Execute chained commands with delays ("open X and after 5 sec maximize it")
-- **🌍 Multi-Language Streaming TTS**: English (Piper), Telugu/Hindi (Edge TTS with true streaming)
+- **🌍 Multi-Language Streaming TTS**: 
+  - English: Piper (local, fast)
+  - Hindi/Telugu: Edge TTS (streaming, female voices - SwaraNeural/ShrutiNeural)
+  - Hindi numbers spoken correctly (45 → "पैंतालीस", not "four five")
 - **🔍 Web Search**: Powered by Perplexity AI for current information
 - **🧠 200-Turn Memory**: Persistent conversation context across sessions
 - **⚡ GPU Acceleration**: CUDA-powered Whisper STT + Mistral LLM
@@ -63,7 +66,9 @@ pip install -r requirements.txt
 
 #### Text-to-Voice Mode (no microphone needed)
 ```bash
-./jarvis.py --text
+./jarvis.py --text                # Auto-detect language
+./jarvis.py --text --hindi        # Force Hindi mode (हिंदी)
+./jarvis.py --text --telugu       # Force Telugu mode (తెలుగు)
 ```
 
 #### Server Only (requires LLM server running separately)
@@ -188,9 +193,10 @@ Use text-to-voice mode: `./jarvis.py --text`
 - [x] Phase 2.5: Production startup system & permanent fixes
 - [x] Phase 3: LLM intent classification for typo handling
 - [x] Phase 3.5: Multi-command execution with delays
-- [x] Phase 4: Telugu/Hindi streaming TTS (Edge TTS)
+- [x] Phase 4: Telugu/Hindi streaming TTS (Edge TTS with female voices)
+- [x] Phase 4.5: Hindi number pronunciation & Indian language polish
 - [ ] Phase 5: Endpoint refactoring
-- [ ] Phase 6: Complete documentation
+- [ ] Phase 6: Complete testing suite
 
 ## 📄 Documentation
 

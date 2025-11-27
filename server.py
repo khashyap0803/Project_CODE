@@ -731,12 +731,11 @@ async def execute_multi_commands(commands: list[dict]):
             })
             yield f"Skipped unknown command: {original_text}"
     
-    # Final summary
+    # Final summary - only show if there were failures
     successful = sum(1 for r in results if r.get("success"))
-    if successful == total_commands:
-        yield f"All {total_commands} commands completed."
-    else:
-        yield f"Completed {successful}/{total_commands} commands."
+    failed = total_commands - successful
+    if failed > 0:
+        yield f"Warning: {failed} of {total_commands} commands failed."
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -1807,11 +1806,17 @@ Result: {json.dumps(tool_result, indent=2)}
             
             return
         
-        # Pattern matching didn't find a tool - try LLM-based classification
-        # This handles typos, variations, and natural language commands
-        llm_intent_start = time.time()
-        llm_intent = await llm_classify_intent(user_query)
-        logger.debug(f"[Timing] LLM intent classification: {time.time() - llm_intent_start:.3f}s")
+        # OPTIMIZATION: Skip LLM intent classification for Indian languages
+        # Tool commands are typically in English, so Hindi/Telugu are likely conversations
+        if language in ['hi', 'te']:
+            logger.debug(f"Skipping LLM intent classification for {language} query (likely conversation)")
+            llm_intent = None
+        else:
+            # Pattern matching didn't find a tool - try LLM-based classification
+            # This handles typos, variations, and natural language commands
+            llm_intent_start = time.time()
+            llm_intent = await llm_classify_intent(user_query)
+            logger.debug(f"[Timing] LLM intent classification: {time.time() - llm_intent_start:.3f}s")
         
         if llm_intent:
             tool_name, parameters = llm_intent
@@ -1923,7 +1928,14 @@ Based on this information, provide a helpful answer."""
 
     if search_context is None:
         # Build conversation context with optional tool support
-        base_system_content = """You are JARVIS, an advanced AI assistant. Be helpful, accurate, and conversational.
+        # Language instruction based on detected language
+        language_instruction = ""
+        if language == 'hi':
+            language_instruction = "\n\nIMPORTANT: The user is communicating in Hindi (हिंदी). You MUST respond in Hindi using Devanagari script. Be natural and conversational in Hindi."
+        elif language == 'te':
+            language_instruction = "\n\nIMPORTANT: The user is communicating in Telugu (తెలుగు). You MUST respond in Telugu using Telugu script. Be natural and conversational in Telugu."
+        
+        base_system_content = f"""You are JARVIS, an advanced AI assistant. Be helpful, accurate, and conversational.
 
 IMPORTANT: Format ALL responses as continuous flowing paragraphs. Never use:
 - Bullet points or lists (•, -, *, numbers)
@@ -1938,7 +1950,7 @@ RESPONSE LENGTH RULES:
 - For questions and conversations: Be conversational but concise.
 - For complex queries: Be detailed as needed.
 
-Always maintain context from previous conversation."""
+Always maintain context from previous conversation.{language_instruction}"""
         if search_failure_note:
             base_system_content += f"\n\n{search_failure_note}"
         
@@ -2182,8 +2194,9 @@ async def voice_text_input(request: dict):
     TEXT INPUT → VOICE OUTPUT (Streaming Audio)
     For testing without microphone: Type question, get voice response
     
-    Input: {"text": "your question"}
+    Input: {"text": "your question", "language": "en|hi|te" (optional)}
     Returns: Streaming audio (WAV format) with <2s latency
+    Supports: English, Hindi (हिंदी), Telugu (తెలుగు)
     """
     try:
         start_time = time.time()
@@ -2195,8 +2208,15 @@ async def voice_text_input(request: dict):
         logger.info(f"Text-to-voice query: {user_text}")
         logger.debug(f"[Timing] Endpoint entry: 0.000s")
         
-        # Auto-detect language (for future multi-language support)
-        detected_lang = "en"  # Default to English for now
+        # Check for forced language hint, otherwise auto-detect
+        forced_lang = request.get("language")
+        if forced_lang and forced_lang in ['en', 'hi', 'te']:
+            detected_lang = forced_lang
+            logger.info(f"Using forced language: {detected_lang}")
+        else:
+            # Auto-detect language from user input (Telugu/Hindi/English)
+            detected_lang = detect_language(user_text)
+            logger.info(f"Auto-detected language: {detected_lang} for text: {user_text[:50]}...")
         
         # TRUE REAL-TIME: Stream LLM → TTS → Audio as sentences are generated!
         async def audio_stream_generator():

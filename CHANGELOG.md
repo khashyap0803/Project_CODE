@@ -2,6 +2,52 @@
 
 All notable changes to the JARVIS Voice Assistant project are documented in this file.
 
+## [3.0.0-v8] - 2025-11-27
+
+### 🗣️ Hindi/Telugu TTS Polished Release
+
+#### Female Voices for Indian Languages
+- **Changed to natural female voices:**
+  - Hindi: `hi-IN-SwaraNeural` (previously MadhurNeural male)
+  - Telugu: `te-IN-ShrutiNeural` (previously MohanNeural male)
+- **Slightly faster speech rate (+5%)** for lower perceived latency
+
+#### Hindi Number Pronunciation (NEW)
+- **Numbers 1-999 now spoken correctly in Hindi:**
+  - 45 → "पैंतालीस" (not "four five")
+  - 123 → "एक सौ तेईस" (one hundred twenty-three)
+  - Complete dictionary for 0-100 with compound number support
+- **Automatic conversion** before TTS synthesis
+- **Logged conversions** for debugging: `Hindi number conversion: '45' → 'पैंतालीस'`
+
+#### Improved Indian Language Sentence Splitting
+- **Better break points for Hindi/Telugu:**
+  - Commas (`, `) and semicolons (`; `) used as break points
+  - Hindi sentence markers: `। ` and `॥ `
+  - Prevents mid-word breaks in Devanagari/Telugu script
+- **Increased buffer to 150 chars** (from 120) for longer natural phrases
+
+#### Multi-Command Feedback Removed
+- **Cleaner responses:** No more "All X commands completed successfully"
+- **Only failure notifications:** Shows warnings only when commands fail
+- **Matches voice assistant expectations:** Brief confirmations, not summaries
+
+#### Text Mode Language Support (NEW)
+- **`--text --telugu`**: Force Telugu mode for text input
+- **`--text --hindi`**: Force Hindi mode for text input
+- **Auto-detect still available**: `--text` alone auto-detects language
+
+#### Skip LLM Classification for Indian Languages
+- **~0.6s latency savings** for Hindi/Telugu queries
+- **Assumption:** Tool commands are typically in English
+- **Falls through to conversation** for Indian language input
+
+#### Bug Fixes
+- Fixed `_piper_synthesize` → `_piper_synthesize_sync` typo in gTTS fallback
+- Fixed Edge TTS MP3→PCM streaming with ffmpeg pipe (was batch-converting)
+
+---
+
 ## [3.0.0-v7] - 2025-11-27
 
 ### 🎯 Multi-Command Execution & Streaming Indian TTS Release

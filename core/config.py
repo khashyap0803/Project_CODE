@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     LLM_DETAILED_QUERY_MAX_TOKENS: int = 1200
     LLM_FAST_TIMEOUT: int = 5  # Aggressive timeout for simple queries
     LLM_NORMAL_TIMEOUT: int = 15
+    LLM_FORCED_SENTENCE_CHARS: int = 150  # Longer buffer for better Hindi/Telugu breaks
     
     # === Text-to-Speech (Piper) ===
     PIPER_MODELS: Dict[str, str] = {

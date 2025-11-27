@@ -22,6 +22,10 @@ perplexity-api==0.1.0  # If available, else use requests
 # Interactive Voice Client (jarvis.py)
 pyaudio==0.2.14  # For voice recording and playback
 
+# Text-to-Speech for Indian Languages
+edge-tts>=6.1.0  # Microsoft Edge TTS for Hindi/Telugu
+pydub>=0.25.0    # Audio format conversion (MP3→PCM)
+
 # Vector Database & Memory
 chromadb==0.4.22
 sentence-transformers==2.3.1

@@ -234,9 +234,23 @@ After the tool executes, you'll receive the result and should respond naturally 
         return sentences
 
     def _extract_forced_sentence(self) -> Optional[str]:
-        """Force flush part of the buffer when no punctuation appears quickly."""
+        """Force flush part of the buffer when no punctuation appears quickly.
+        
+        Improved for Hindi/Telugu: Avoids breaking in middle of words.
+        Uses comma, semicolon as secondary break points.
+        """
         if len(self.sentence_buffer) < self.forced_sentence_chars:
             return None
+        
+        # First try to find a comma or semicolon within the range (natural pause points)
+        for sep in [', ', '; ', '। ', '॥ ', '- ']:
+            sep_index = self.sentence_buffer.rfind(sep, 0, self.forced_sentence_chars)
+            if sep_index > 20:  # Found a good break point
+                sentence = self.sentence_buffer[:sep_index + len(sep)].strip()
+                self.sentence_buffer = self.sentence_buffer[sep_index + len(sep):].lstrip()
+                return sentence or None
+        
+        # Fallback: find last space (word boundary)
         split_index = self.sentence_buffer.rfind(' ', 0, self.forced_sentence_chars)
         if split_index == -1:
             split_index = self.forced_sentence_chars

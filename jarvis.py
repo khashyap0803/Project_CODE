@@ -283,29 +283,57 @@ def main():
         if sys.argv[1] == "--help":
             print("JARVIS Interactive Voice Assistant")
             print()
-            print("Usage: python jarvis.py [--text]")
+            print("Usage: python jarvis.py [OPTIONS]")
             print()
             print("Options:")
-            print("  --text    Text-only mode (no microphone needed)")
+            print("  --text             Text-only mode (auto-detect language)")
+            print("  --text --telugu    Text mode for Telugu (తెలుగు)")
+            print("  --text --hindi     Text mode for Hindi (हिंदी)")
+            print("  --help             Show this help message")
+            print()
+            print("Examples:")
+            print("  python jarvis.py              # Voice mode")
+            print("  python jarvis.py --text       # Text mode (auto-detect)")
+            print("  python jarvis.py --text --telugu  # Telugu text mode")
+            print("  python jarvis.py --text --hindi   # Hindi text mode")
             print()
             print("Speak naturally to JARVIS and get voice responses.")
             print("Press Ctrl+C to exit.")
             return
         elif sys.argv[1] == "--text":
+            # Check for language flag
+            language = None
+            if len(sys.argv) > 2:
+                if sys.argv[2] in ["--telugu", "-te"]:
+                    language = "te"
+                elif sys.argv[2] in ["--hindi", "-hi"]:
+                    language = "hi"
             # Text-only mode for testing without microphone
-            run_text_mode()
+            run_text_mode(language=language)
             return
     
     client = JARVISClient()
     client.run_interactive()
 
-def run_text_mode():
-    """Text input mode with voice output (streaming audio)"""
+def run_text_mode(language=None):
+    """Text input mode with voice output (streaming audio)
+    
+    Args:
+        language: Force language ('te' for Telugu, 'hi' for Hindi, None for auto-detect)
+    """
+    lang_names = {'te': 'Telugu (తెలుగు)', 'hi': 'Hindi (हिंदी)', None: 'Auto-Detect'}
+    lang_mode = lang_names.get(language, 'Auto-Detect')
+    
     print("\n" + "="*70)
     print("🎯 JARVIS Text-to-Voice Mode")
+    print(f"🌐 Language: {lang_mode}")
     print("="*70)
     print()
     print("💡 Type your questions, JARVIS responds with VOICE (streaming audio)")
+    if language == 'te':
+        print("   తెలుగులో టైప్ చేయండి - JARVIS తెలుగులో జవాబిస్తుంది!")
+    elif language == 'hi':
+        print("   हिंदी में टाइप करें - JARVIS हिंदी में जवाब देगा!")
     print("   Type 'quit' or 'exit' to stop.")
     print()
     print("="*70 + "\n")
@@ -365,9 +393,13 @@ def run_text_mode():
             output_stream.write(warmup_silence)
             
             # Send text to /api/voice/text endpoint for streaming audio response
+            request_data = {"text": user_text, "session_id": session_id}
+            if language:
+                request_data["language"] = language  # Force language hint
+            
             response = requests.post(
                 f"{SERVER_URL}/api/voice/text",
-                json={"text": user_text, "session_id": session_id},
+                json=request_data,
                 stream=True,
                 timeout=120  # 2 minutes for web search and long queries
             )

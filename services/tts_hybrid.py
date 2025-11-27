@@ -1,18 +1,31 @@
 """
 Hybrid TTS Service: Piper (English) + Edge TTS (Hindi/Telugu) with TRUE STREAMING
 Provides high-quality TTS for all three languages with real-time streaming
+Converts all audio to unified PCM/WAV format (22050Hz, stereo, 16-bit)
 """
 import os
 import io
 import asyncio
 import struct
+import tempfile
+import subprocess
 from pathlib import Path
 from typing import Generator, Optional, AsyncGenerator
 from services.tts import piper_tts  # Use global instance
 from core.config import settings
 from core.logger import setup_logger
+import time
 
 logger = setup_logger(__name__)
+
+# pydub for audio format conversion
+try:
+    from pydub import AudioSegment
+    PYDUB_AVAILABLE = True
+    logger.info("pydub available for MP3→PCM conversion")
+except ImportError:
+    PYDUB_AVAILABLE = False
+    logger.warning("pydub not available - Edge TTS may not work correctly")
 
 # Edge TTS for Indian languages (streaming support)
 try:
@@ -31,12 +44,63 @@ except ImportError:
     GTTS_AVAILABLE = False
 
 # Edge TTS voice mapping for Indian languages
+# Using highest quality neural voices
 EDGE_TTS_VOICES = {
-    'hi': 'hi-IN-MadhurNeural',   # Hindi male voice (clear and natural)
-    'te': 'te-IN-MohanNeural',    # Telugu male voice
-    'hi-female': 'hi-IN-SwaraNeural',  # Hindi female alternative
-    'te-female': 'te-IN-ShrutiNeural', # Telugu female alternative
+    'hi': 'hi-IN-SwaraNeural',    # Hindi female - very natural
+    'te': 'te-IN-ShrutiNeural',   # Telugu female - clear pronunciation
 }
+
+# Hindi number words for better TTS pronunciation
+HINDI_NUMBERS = {
+    0: 'शून्य', 1: 'एक', 2: 'दो', 3: 'तीन', 4: 'चार', 5: 'पांच',
+    6: 'छह', 7: 'सात', 8: 'आठ', 9: 'नौ', 10: 'दस',
+    11: 'ग्यारह', 12: 'बारह', 13: 'तेरह', 14: 'चौदह', 15: 'पंद्रह',
+    16: 'सोलह', 17: 'सत्रह', 18: 'अठारह', 19: 'उन्नीस', 20: 'बीस',
+    21: 'इक्कीस', 22: 'बाईस', 23: 'तेईस', 24: 'चौबीस', 25: 'पच्चीस',
+    26: 'छब्बीस', 27: 'सत्ताईस', 28: 'अट्ठाईस', 29: 'उनतीस', 30: 'तीस',
+    31: 'इकतीस', 32: 'बत्तीस', 33: 'तैंतीस', 34: 'चौंतीस', 35: 'पैंतीस',
+    36: 'छत्तीस', 37: 'सैंतीस', 38: 'अड़तीस', 39: 'उनतालीस', 40: 'चालीस',
+    41: 'इकतालीस', 42: 'बयालीस', 43: 'तैंतालीस', 44: 'चौवालीस', 45: 'पैंतालीस',
+    46: 'छियालीस', 47: 'सैंतालीस', 48: 'अड़तालीस', 49: 'उनचास', 50: 'पचास',
+    51: 'इक्यावन', 52: 'बावन', 53: 'तिरपन', 54: 'चौवन', 55: 'पचपन',
+    56: 'छप्पन', 57: 'सत्तावन', 58: 'अट्ठावन', 59: 'उनसठ', 60: 'साठ',
+    61: 'इकसठ', 62: 'बासठ', 63: 'तिरसठ', 64: 'चौंसठ', 65: 'पैंसठ',
+    66: 'छियासठ', 67: 'सड़सठ', 68: 'अड़सठ', 69: 'उनहत्तर', 70: 'सत्तर',
+    71: 'इकहत्तर', 72: 'बहत्तर', 73: 'तिहत्तर', 74: 'चौहत्तर', 75: 'पचहत्तर',
+    76: 'छिहत्तर', 77: 'सतहत्तर', 78: 'अठहत्तर', 79: 'उनासी', 80: 'अस्सी',
+    81: 'इक्यासी', 82: 'बयासी', 83: 'तिरासी', 84: 'चौरासी', 85: 'पचासी',
+    86: 'छियासी', 87: 'सत्तासी', 88: 'अट्ठासी', 89: 'नवासी', 90: 'नब्बे',
+    91: 'इक्यानवे', 92: 'बानवे', 93: 'तिरानवे', 94: 'चौरानवे', 95: 'पचानवे',
+    96: 'छियानवे', 97: 'सत्तानवे', 98: 'अट्ठानवे', 99: 'निन्यानवे', 100: 'सौ'
+}
+
+def convert_numbers_to_hindi_words(text: str) -> str:
+    """Convert numeric digits to Hindi words for better TTS pronunciation"""
+    import re
+    
+    def replace_number(match):
+        num = int(match.group())
+        if num in HINDI_NUMBERS:
+            return HINDI_NUMBERS[num]
+        elif num < 1000:
+            # Handle larger numbers: break into hundreds + remainder
+            hundreds = num // 100
+            remainder = num % 100
+            result = []
+            if hundreds > 0:
+                result.append(HINDI_NUMBERS.get(hundreds, str(hundreds)))
+                result.append('सौ')
+            if remainder > 0:
+                result.append(HINDI_NUMBERS.get(remainder, str(remainder)))
+            return ' '.join(result)
+        return str(num)  # Keep as-is for very large numbers
+    
+    # Replace standalone numbers (not part of URLs, times, etc.)
+    original = text
+    result = re.sub(r'\b(\d{1,3})\b', replace_number, text)
+    if original != result:
+        logger.debug(f"Hindi number conversion: '{original}' → '{result}'")
+    return result
 
 class HybridTTSService:
     def __init__(self):
@@ -77,27 +141,144 @@ class HybridTTSService:
     
     async def _edge_tts_synthesize_stream(self, text: str, language: str) -> AsyncGenerator[bytes, None]:
         """
-        Stream audio from Edge TTS (Microsoft) for Hindi/Telugu.
-        TRUE STREAMING - yields audio chunks as they are generated.
+        Stream audio from Edge TTS with TRUE STREAMING MP3→PCM conversion.
+        Uses ffmpeg pipe for real-time conversion without waiting for full audio.
+        Output: 22050Hz, stereo, 16-bit PCM (matches Piper output format)
         """
+        voice = EDGE_TTS_VOICES.get(language, EDGE_TTS_VOICES.get('hi'))
+        start_time = time.time()
+        
+        # Convert numbers to Hindi words for better pronunciation
+        if language == 'hi':
+            text = convert_numbers_to_hindi_words(text)
+        
+        try:
+            # Start ffmpeg process for real-time MP3→PCM conversion
+            # Input: MP3 stream, Output: raw PCM s16le, 22050Hz, stereo
+            ffmpeg_process = await asyncio.create_subprocess_exec(
+                'ffmpeg',
+                '-hide_banner', '-loglevel', 'error',
+                '-f', 'mp3', '-i', 'pipe:0',  # Input: MP3 from stdin
+                '-f', 's16le',                 # Output format: raw PCM
+                '-ar', '22050',                # Sample rate: 22050Hz (match Piper)
+                '-ac', '2',                    # Channels: stereo
+                '-acodec', 'pcm_s16le',        # Codec: 16-bit signed little-endian
+                'pipe:1',                      # Output to stdout
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            # Use slightly faster rate (+5%) for lower latency while maintaining quality
+            # Rate range: -50% to +100%, default is +0%
+            communicate = edge_tts.Communicate(text, voice, rate="+5%")
+            
+            # Task to feed MP3 data to ffmpeg stdin
+            async def feed_mp3():
+                try:
+                    async for chunk in communicate.stream():
+                        if chunk["type"] == "audio":
+                            ffmpeg_process.stdin.write(chunk["data"])
+                            await ffmpeg_process.stdin.drain()
+                    ffmpeg_process.stdin.close()
+                    await ffmpeg_process.stdin.wait_closed()
+                except Exception as e:
+                    logger.error(f"Edge TTS feed error: {e}")
+                    try:
+                        ffmpeg_process.stdin.close()
+                    except:
+                        pass
+            
+            # Start feeding MP3 data in background
+            feed_task = asyncio.create_task(feed_mp3())
+            
+            # Read PCM output from ffmpeg in real-time
+            first_chunk = True
+            total_bytes = 0
+            chunk_size = 4096  # 4KB chunks for smooth streaming
+            
+            while True:
+                pcm_chunk = await ffmpeg_process.stdout.read(chunk_size)
+                if not pcm_chunk:
+                    break
+                    
+                if first_chunk:
+                    first_chunk = False
+                    logger.debug(f"Edge TTS first PCM chunk in {time.time() - start_time:.3f}s")
+                
+                total_bytes += len(pcm_chunk)
+                yield pcm_chunk
+            
+            # Wait for feed task to complete
+            await feed_task
+            
+            # Wait for ffmpeg to finish
+            await ffmpeg_process.wait()
+            
+            logger.info(f"Edge TTS [{language}]: {len(text)} chars → {total_bytes} bytes PCM in {time.time() - start_time:.2f}s")
+            
+        except Exception as e:
+            logger.error(f"Edge TTS streaming error: {e}")
+            # Fallback to non-streaming method
+            async for chunk in self._edge_tts_fallback(text, language):
+                yield chunk
+    
+    async def _edge_tts_fallback(self, text: str, language: str) -> AsyncGenerator[bytes, None]:
+        """Fallback: collect all MP3, then convert (higher latency but more reliable)"""
         voice = EDGE_TTS_VOICES.get(language, EDGE_TTS_VOICES.get('hi'))
         
         try:
             communicate = edge_tts.Communicate(text, voice)
-            
-            # Edge TTS streams MP3 chunks - we yield them directly
-            # The client can play MP3 or we can convert if needed
+            mp3_data = b""
             async for chunk in communicate.stream():
                 if chunk["type"] == "audio":
-                    yield chunk["data"]
+                    mp3_data += chunk["data"]
+            
+            if not mp3_data:
+                logger.warning("Edge TTS returned no audio data")
+                return
+            
+            # Convert using pydub
+            if PYDUB_AVAILABLE:
+                audio = AudioSegment.from_mp3(io.BytesIO(mp3_data))
+                audio = audio.set_frame_rate(22050).set_channels(2).set_sample_width(2)
+                pcm_data = audio.raw_data
+                
+                chunk_size = 4096
+                for i in range(0, len(pcm_data), chunk_size):
+                    yield pcm_data[i:i + chunk_size]
+            else:
+                # ffmpeg fallback
+                async for chunk in self._convert_mp3_to_pcm_ffmpeg(mp3_data):
+                    yield chunk
                     
         except Exception as e:
-            logger.error(f"Edge TTS streaming error: {e}")
-            # Fallback to gTTS if Edge TTS fails
-            if GTTS_AVAILABLE:
-                logger.info("Falling back to gTTS")
-                for chunk in self._gtts_synthesize(text, language):
-                    yield chunk
+            logger.error(f"Edge TTS fallback error: {e}")
+    
+    async def _convert_mp3_to_pcm_ffmpeg(self, mp3_data: bytes) -> AsyncGenerator[bytes, None]:
+        """Convert MP3 to PCM using ffmpeg subprocess"""
+        try:
+            # Use ffmpeg to convert MP3 to raw PCM
+            process = await asyncio.create_subprocess_exec(
+                'ffmpeg', '-i', 'pipe:0', '-f', 's16le', '-ar', '22050', '-ac', '2', 'pipe:1',
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await process.communicate(input=mp3_data)
+            
+            if process.returncode != 0:
+                logger.error(f"ffmpeg error: {stderr.decode()}")
+                return
+                
+            # Stream PCM data in chunks
+            chunk_size = 4096
+            for i in range(0, len(stdout), chunk_size):
+                yield stdout[i:i + chunk_size]
+                
+        except Exception as e:
+            logger.error(f"ffmpeg conversion error: {e}")
     
     async def synthesize_stream_async(
         self, 
@@ -333,7 +514,7 @@ class HybridTTSService:
             logger.error(f"gTTS synthesis error: {e}")
             # Fallback to English Piper
             logger.info("Falling back to English TTS")
-            yield from self._piper_synthesize(text, 'en')
+            yield from self._piper_synthesize_sync(text, 'en')
 
 # Global service instance
 tts_service = HybridTTSService()
